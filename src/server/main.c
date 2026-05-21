@@ -131,6 +131,16 @@ int main(int argc, char** argv) {
     printf("Database: %s\n", db_path);
     printf("Socket: %s\n", server->socket_path);
     printf("PID file: %s\n", pid_file);
+
+    /* Initialize storage with database path */
+    if (tinydb_open(&server->storage, db_path) != 0) {
+        fprintf(stderr, "Failed to open database at %s\n", db_path);
+        server_remove_pid(pid_file);
+        server_remove_lock(lock_file);
+        server_shutdown(server);
+        return 1;
+    }
+
     printf("Server listening...\n");
 
     /* NOTE: Full storage integration pending SQL engine implementation */
@@ -139,6 +149,9 @@ int main(int argc, char** argv) {
     server_run(server);
 
     printf("Server shutting down...\n");
+    if (server->storage) {
+        tinydb_close(server->storage);
+    }
     server_shutdown(server);
 
     return 0;

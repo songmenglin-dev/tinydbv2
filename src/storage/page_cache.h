@@ -1,6 +1,9 @@
 #ifndef TINYDB_PAGE_CACHE_H
 #define TINYDB_PAGE_CACHE_H
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "../../include/tinydb.h"
@@ -55,7 +58,7 @@ typedef struct PageCache {
 
     /* Thread safety */
     pthread_mutex_t mutex;
-    pthread_rwlock_t rwlock;  /* Read-write lock for page access */
+    /* pthread_rwlock_t rwlock;  Read-write lock for page access - temporarily disabled */
 
     /* Statistics */
     int pin_count;           /* Current pins */

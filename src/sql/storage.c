@@ -1,21 +1,33 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "../../include/tinydb.h"
 #include "../util/error.h"
+#include <pthread.h>
+#include "../storage/pager.h"
+#include "../storage/page_cache.h"
+#include "../storage/btree.h"
+#include "catalog.h"
 #include <stdlib.h>
 #include <string.h>
 
 /*============================================================================
- * Storage stub implementation
- * This provides minimal stubs for tinydb_* functions until full storage
- * is implemented in Phase 5.
+ * Storage implementation with real pager, cache, and catalog
  *============================================================================*/
 
-/* Storage structure - opaque, stub for now */
 struct Storage {
-    int is_open;
+    Pager* pager;
+    PageCache* cache;
+    Catalog* catalog;
     char* path;
+    int is_open;
 };
 
-/* Connection structure - opaque, stub for now */
+/* Connection structure */
 struct Connection {
     Storage* storage;
     int is_connected;
@@ -24,22 +36,68 @@ struct Connection {
 int tinydb_open(Storage** storage, const char* path) {
     if (!storage) return ERR_INTERNAL;
 
-    Storage* s = malloc(sizeof(Storage));
+    Storage* s = calloc(1, sizeof(Storage));
     if (!s) return ERR_OUT_OF_MEMORY;
 
-    memset(s, 0, sizeof(Storage));
-    s->is_open = 1;
-    if (path) {
-        s->path = malloc(strlen(path) + 1);
+    s->path = path ? malloc(strlen(path) + 1) : NULL;
+    if (path && s->path) {
         strcpy(s->path, path);
     }
 
+    /* Open or create pager */
+    if (path) {
+        s->pager = pager_open(path);
+        if (!s->pager) {
+            s->pager = pager_create(path);
+        }
+        if (!s->pager) {
+            free(s->path);
+            free(s);
+            return ERR_STORAGE_IO;
+        }
+    } else {
+        s->pager = pager_create(":memory:");
+        if (!s->pager) {
+            free(s);
+            return ERR_STORAGE_IO;
+        }
+    }
+
+    /* Create page cache */
+    s->cache = page_cache_create(256, s->pager);
+    if (!s->cache) {
+        pager_close(s->pager);
+        free(s->path);
+        free(s);
+        return ERR_STORAGE_IO;
+    }
+
+    /* Open catalog */
+    s->catalog = catalog_open(s->pager, s->cache);
+    if (!s->catalog) {
+        page_cache_destroy(s->cache);
+        pager_close(s->pager);
+        free(s->path);
+        free(s);
+        return ERR_STORAGE_IO;
+    }
+
+    s->is_open = 1;
     *storage = s;
     return SUCCESS;
 }
 
 void tinydb_close(Storage* storage) {
     if (!storage) return;
+    if (storage->catalog) {
+        catalog_close(storage->catalog);
+    }
+    if (storage->cache) {
+        page_cache_destroy(storage->cache);
+    }
+    if (storage->pager) {
+        pager_close(storage->pager);
+    }
     free(storage->path);
     free(storage);
 }
@@ -154,4 +212,22 @@ Error* tinydb_error(Storage* storage) {
 
 void tinydb_error_clear(Storage* storage) {
     (void)storage;
+}
+
+/* Get catalog from storage (for executor access) */
+Catalog* storage_get_catalog(Storage* storage) {
+    if (!storage) return NULL;
+    return storage->catalog;
+}
+
+/* Get pager from storage */
+Pager* storage_get_pager(Storage* storage) {
+    if (!storage) return NULL;
+    return storage->pager;
+}
+
+/* Get page cache from storage */
+PageCache* storage_get_cache(Storage* storage) {
+    if (!storage) return NULL;
+    return storage->cache;
 }

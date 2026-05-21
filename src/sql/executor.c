@@ -2,6 +2,11 @@
 
 #include "executor.h"
 #include "expression.h"
+#include "storage.h"
+#include "catalog.h"
+#include "../storage/pager.h"
+#include "../storage/page_cache.h"
+#include "../storage/btree.h"
 #include "../util/error.h"
 #include "../../include/tinydb.h"
 #include <stdlib.h>
@@ -173,13 +178,54 @@ int executor_exec_rollback(Executor* exec, AstTransaction* stmt) {
 }
 
 /*============================================================================
- * Schema execution stubs
+ * Schema execution
  *============================================================================*/
 int executor_exec_create_table(Executor* exec, AstCreateTable* stmt) {
-    (void)exec;
-    (void)stmt;
-    /* TODO: Implement using storage layer */
-    return SUCCESS;
+    if (!exec || !stmt || !stmt->table_name) return ERR_INTERNAL;
+    if (!exec->storage) return ERR_INTERNAL;
+
+    /* Get storage components */
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    if (!catalog) return ERR_INTERNAL;
+
+    /* Build SQL string for catalog */
+    char sql[512];
+    int offset = snprintf(sql, sizeof(sql), "CREATE TABLE %s (", stmt->table_name);
+
+    ColumnDef* col = stmt->columns;
+    int first = 1;
+    while (col && offset < (int)sizeof(sql) - 50) {
+        if (!first) {
+            offset += snprintf(sql + offset, sizeof(sql) - offset, ", ");
+        }
+        first = 0;
+        offset += snprintf(sql + offset, sizeof(sql) - offset, "%s ", col->name);
+        switch (col->type) {
+            case COL_TYPE_INTEGER: offset += snprintf(sql + offset, sizeof(sql) - offset, "INT"); break;
+            case COL_TYPE_FLOAT: offset += snprintf(sql + offset, sizeof(sql) - offset, "FLOAT"); break;
+            case COL_TYPE_TEXT: offset += snprintf(sql + offset, sizeof(sql) - offset, "TEXT"); break;
+            case COL_TYPE_BLOB: offset += snprintf(sql + offset, sizeof(sql) - offset, "BLOB"); break;
+            default: offset += snprintf(sql + offset, sizeof(sql) - offset, "TEXT"); break;
+        }
+        if (col->not_null) offset += snprintf(sql + offset, sizeof(sql) - offset, " NOT NULL");
+        if (col->primary_key) offset += snprintf(sql + offset, sizeof(sql) - offset, " PRIMARY KEY");
+        col = col->next;
+    }
+    if (offset < (int)sizeof(sql) - 2) {
+        offset += snprintf(sql + offset, sizeof(sql) - offset, ")");
+    }
+
+    /* Create catalog entry */
+    CatalogEntry entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.type = CATALOG_TYPE_TABLE;
+    strncpy(entry.name, stmt->table_name, 63);
+    strncpy(entry.tbl_name, stmt->table_name, 63);
+    strncpy(entry.sql, sql, 511);
+
+    /* Insert into catalog */
+    int ret = catalog_insert(catalog, &entry);
+    return ret;
 }
 
 int executor_exec_drop_table(Executor* exec, AstDropTable* stmt) {
@@ -204,7 +250,7 @@ int executor_exec_drop_index(Executor* exec, AstDropIndex* stmt) {
 }
 
 /*============================================================================
- * DML execution stubs
+ * DML execution
  *============================================================================*/
 int executor_exec_insert(Executor* exec, AstInsert* stmt) {
     (void)exec;
