@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE
 #include "lexer.h"
 #include <stdlib.h>
 #include <string.h>
@@ -171,7 +172,7 @@ static TokenType lookup_keyword(const char* text, size_t len) {
         int mid = (low + high) / 2;
         size_t kw_len = strlen(keywords[mid].keyword);
         size_t min_len = len < kw_len ? len : kw_len;
-        int cmp = strncmp(text, keywords[mid].keyword, min_len);
+        int cmp = strncasecmp(text, keywords[mid].keyword, min_len);
 
         if (cmp == 0) {
             /* Prefixes match - shorter string comes first */
