@@ -1,0 +1,101 @@
+% TINYDB-CLI(1) TinyDB v2
+% TinyDB Project
+% May 2026
+
+# NAME
+
+tinydb-cli - TinyDB SQL database command-line client
+
+# SYNOPSIS
+
+**tinydb-cli** [*socket_path*]
+
+**tinydb-cli** [*host* [*port*]]
+
+# DESCRIPTION
+
+TinyDB CLI is the command-line client for TinyDB SQL database. It connects
+to the TinyDB server via Unix domain socket or TCP and provides an interactive
+SQL shell for executing queries and managing data.
+
+# ARGUMENTS
+
+socket_path
+:   Path to the Unix domain socket. Default: `/run/tinydb/tinydb.sock`.
+
+host
+:   Hostname for TCP connection. Default: `localhost`.
+
+port
+:   TCP port number. Default: `5432`.
+
+# COMMANDS
+
+The CLI supports standard SQL statements. Type statements terminated with
+a semicolon (;) and press Enter to execute.
+
+### Data Definition
+
+```sql
+CREATE TABLE name (column_definitions)
+DROP TABLE name
+CREATE INDEX index_name ON table_name(column)
+DROP INDEX index_name ON table_name
+```
+
+### Data Manipulation
+
+```sql
+INSERT INTO table (columns) VALUES (values)
+UPDATE table SET column = value WHERE condition
+DELETE FROM table WHERE condition
+```
+
+### Querying
+
+```sql
+SELECT columns FROM table WHERE condition
+```
+
+### Transactions
+
+```sql
+BEGIN
+COMMIT
+ROLLBACK
+```
+
+# EXIT STATUS
+
+0
+:   Success
+
+1
+:   Connection error or query failed
+
+# EXAMPLES
+
+Connect to default socket:
+
+```bash
+$ tinydb-cli
+TinyDB CLI v2
+Connected to /run/tinydb/tinydb.sock
+tinydb> SELECT * FROM users;
+```
+
+Connect to custom socket:
+
+```bash
+$ tinydb-cli /var/run/tinydb/tinydb.sock
+```
+
+Connect via TCP:
+
+```bash
+$ tinydb-cli localhost 5432
+```
+
+# SEE ALSO
+
+**tinydb-server**(1), **tinydb.conf**(5)

@@ -7,9 +7,12 @@
 *.exe
 
 # Binaries
+build/
 tinydb
 tinydb-cli
+tinydb-server
 db-test
+test-suite
 
 # Libraries (static)
 *.lib
@@ -26,7 +29,6 @@ db-test
 
 # Release builds
 release/
-build/
 dist/
 
 # CMake
@@ -64,7 +66,11 @@ Thumbs.db
 *.log
 *.sqlite
 *.sqlite3
+
+# Database files
 *.db
+*.db-wal
+*.db-shm
 
 # Temp files
 *.tmp
@@ -90,6 +96,12 @@ core.*
 *.tfstate.*
 .terraform/
 
-# No gitignore - keep these directories
-# openspec/
-# .claude/
+# Coverage
+*.gcov
+*.gcda
+*.gcno
+coverage/
+
+# Valgrind
+vgcore.*
+*.supp

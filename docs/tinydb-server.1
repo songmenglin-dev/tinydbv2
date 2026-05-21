@@ -1,0 +1,85 @@
+% TINYDB-SERVER(1) TinyDB v2
+% TinyDB Project
+% May 2026
+
+# NAME
+
+tinydb-server - TinyDB SQL database server daemon
+
+# SYNOPSIS
+
+**tinydb-server** [*options*]
+
+# DESCRIPTION
+
+TinyDB is a lightweight SQL database written in C, similar to SQLite but with
+client-server architecture. The server daemon handles SQL query execution,
+transaction management, and storage operations.
+
+The server listens on a Unix domain socket for client connections. It supports
+multiple concurrent clients with ACID transaction guarantees.
+
+# OPTIONS
+
+-h, --help
+: Display help message and exit
+
+-v, --version
+: Display version information and exit
+
+# ENVIRONMENT
+
+The following environment variables control server behavior:
+
+TINYDB_LOG_LEVEL
+:   Log level. Valid values: `debug`, `info`, `warn`, `error`. Default: `info`.
+
+TINYDB_DATA_DIR
+:   Database data directory. Default: `/var/lib/tinydb`.
+
+TINYDB_PORT
+:   TCP port for client connections (when socket not available).
+:   Default: `5432`.
+
+TINYDB_CACHE_SIZE
+:   Page cache size in pages. Default: `256`.
+
+# FILES
+
+/var/lib/tinydb
+:   Default database data directory.
+
+/var/log/tinydb
+:   Default log directory.
+
+/run/tinydb/tinydb.sock
+:   Default Unix domain socket for client connections.
+
+/etc/tinydb/tinydb.conf
+:   Configuration file (not yet implemented).
+
+# SYSTEMD
+
+When installed with systemd, the service can be controlled via:
+
+```bash
+systemctl start tinydb.socket   # Start socket listener
+systemctl enable tinydb.socket  # Enable at boot
+systemctl status tinydb          # Check status
+journalctl -u tinydb-server     # View logs
+```
+
+# EXIT STATUS
+
+0
+:   Success
+
+1
+:   General error
+
+2
+:   Invalid arguments
+
+# SEE ALSO
+
+**tinydb-cli**(1), **tinydb.conf**(5)

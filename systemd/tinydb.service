@@ -1,0 +1,90 @@
+[Unit]
+Description=TinyDB SQL Database Server v2
+Documentation=man:tinydb-server(1)
+After=network.target
+Before=tinydb-cli.service
+
+[Service]
+Type=notify
+User=tinydb
+Group=tinydb
+
+# Runtime directories
+RuntimeDirectory=tinydb
+RuntimeDirectoryMode=0755
+
+# State and data directories
+StateDirectory=tinydb
+StateDirectoryMode=0755
+
+# Log directory
+LogsDirectory=tinydb
+LogsDirectoryMode=0755
+
+# Working directory
+WorkingDirectory=/var/lib/tinydb
+
+# Executable
+ExecStart=/usr/local/bin/tinydb-server
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Environment variables
+Environment=TINYDB_LOG_LEVEL=info
+Environment=TINYDB_DATA_DIR=/var/lib/tinydb
+Environment=TINYDB_PORT=5432
+
+# Security sandbox directives
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectCITarget=true
+
+# Restrict capabilities
+CapabilityBoundingSet=
+
+# File system restrictions
+ReadOnlyPaths=/proc
+ReadOnlyPaths=/sys
+ReadOnlyPaths=/etc/tinydb.conf
+ProtectSystem=strict
+
+# Allow writable directories
+ReadWritePaths=/run/tinydb
+ReadWritePaths=/var/lib/tinydb
+ReadWritePaths=/var/log/tinydb
+
+# System call filtering
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# Sandboxing
+RestrictNamespaces=true
+MemoryDenyWriteExecute=false
+RestrictRealtime=true
+
+# Timeout settings
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tinydb-server
+
+[Install]
+WantedBy=multi-user.target

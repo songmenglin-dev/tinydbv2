@@ -1,0 +1,75 @@
+% TINYDB.CONF(5) TinyDB v2
+% TinyDB Project
+% May 2026
+
+# NAME
+
+tinydb.conf - TinyDB configuration file
+
+# SYNOPSIS
+
+/etc/tinydb/tinydb.conf
+
+# DESCRIPTION
+
+TinyDB configuration file uses a simple key=value format. Lines starting
+with # are comments.
+
+# CONFIGURATION OPTIONS
+
+## Server Options
+
+port = *number*
+:   TCP port for client connections. Default: 5432.
+
+socket_path = *path*
+:   Unix domain socket path. Default: /run/tinydb/tinydb.sock.
+
+max_connections = *number*
+:   Maximum number of concurrent connections. Default: 64.
+
+## Storage Options
+
+data_dir = *path*
+:   Database data directory. Default: /var/lib/tinydb.
+
+cache_size = *number*
+:   Page cache size in pages. Default: 256.
+
+## WAL Options
+
+wal_autocheckpoint = *true|false*
+:   Enable automatic WAL checkpoint. Default: true.
+
+wal_threshold = *number*
+:   Number of writes before auto-checkpoint. Default: 1000.
+
+## Logging Options
+
+log_level = *debug|info|warn|error*
+:   Log level. Default: info.
+
+log_path = *path*
+:   Log file path. Default: /var/log/tinydb/tinydb.log.
+
+# EXAMPLE
+
+```
+# TinyDB Configuration
+port = 5432
+socket_path = /run/tinydb/tinydb.sock
+data_dir = /var/lib/tinydb
+cache_size = 256
+wal_autocheckpoint = true
+wal_threshold = 1000
+log_level = info
+```
+
+# FILES
+
+/etc/tinydb/tinydb.conf
+:   Main configuration file.
+
+# SEE ALSO
+
+**tinydb-server**(1), **tinydb-cli**(1)

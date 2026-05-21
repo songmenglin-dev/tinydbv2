@@ -1,0 +1,22 @@
+[Unit]
+Description=TinyDB SQL Database Server Socket v2
+Documentation=man:tinydb-server(1)
+PartOf=tinydb.service
+
+[Socket]
+ListenStream=/run/tinydb/tinydb.sock
+SocketMode=0660
+SocketUser=tinydb
+SocketGroup=tinydb
+
+# Socket activation settings
+Accept=false
+MaxConnections=64
+
+# Timeout settings
+TimeoutSec=60
+KeepAlive=true
+KeepAliveTimeSec=300
+
+[Install]
+WantedBy=sockets.target
