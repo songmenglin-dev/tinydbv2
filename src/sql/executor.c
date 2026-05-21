@@ -186,7 +186,9 @@ int executor_exec_create_table(Executor* exec, AstCreateTable* stmt) {
 
     /* Get storage components */
     Catalog* catalog = storage_get_catalog(exec->storage);
-    if (!catalog) return ERR_INTERNAL;
+    Pager* pager = storage_get_pager(exec->storage);
+    PageCache* cache = storage_get_cache(exec->storage);
+    if (!catalog || !pager || !cache) return ERR_INTERNAL;
 
     /* Build SQL string for catalog */
     char sql[512];
@@ -215,6 +217,12 @@ int executor_exec_create_table(Executor* exec, AstCreateTable* stmt) {
         offset += snprintf(sql + offset, sizeof(sql) - offset, ")");
     }
 
+    /* Create B+tree for table data */
+    BTree* table_tree = btree_create(pager, cache);
+    if (!table_tree) return ERR_STORAGE_IO;
+    uint32_t root_page = table_tree->root_page;  /* Get root page from created tree */
+    btree_close(table_tree);  /* Close tree but keep pages allocated */
+
     /* Create catalog entry */
     CatalogEntry entry;
     memset(&entry, 0, sizeof(entry));
@@ -222,9 +230,12 @@ int executor_exec_create_table(Executor* exec, AstCreateTable* stmt) {
     strncpy(entry.name, stmt->table_name, 63);
     strncpy(entry.tbl_name, stmt->table_name, 63);
     strncpy(entry.sql, sql, 511);
+    entry.root_page = root_page;
+    entry.is_valid = 1;
 
     /* Insert into catalog */
     int ret = catalog_insert(catalog, &entry);
+    btree_close(table_tree);
     return ret;
 }
 
@@ -253,10 +264,67 @@ int executor_exec_drop_index(Executor* exec, AstDropIndex* stmt) {
  * DML execution
  *============================================================================*/
 int executor_exec_insert(Executor* exec, AstInsert* stmt) {
-    (void)exec;
-    (void)stmt;
-    /* TODO: Implement using storage layer */
-    return SUCCESS;
+    if (!exec || !stmt || !stmt->table_name) return ERR_INTERNAL;
+    if (!exec->storage) return ERR_INTERNAL;
+
+    /* Get storage components */
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    Pager* pager = storage_get_pager(exec->storage);
+    PageCache* cache = storage_get_cache(exec->storage);
+    if (!catalog || !pager || !cache) return ERR_INTERNAL;
+
+    /* Lookup table in catalog */
+    CatalogEntry* table_entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, stmt->table_name);
+    if (!table_entry) {
+        return ERR_EXEC_TABLE_NOT_FOUND;
+    }
+
+    /* Get table's B+tree */
+    BTree* table_tree = NULL;
+    if (table_entry->root_page > 0) {
+        table_tree = btree_open(pager, cache, table_entry->root_page);
+    }
+
+    if (!table_tree) {
+        free(table_entry);
+        return ERR_STORAGE_IO;
+    }
+
+    /* Serialize row data: interleave key (rowid) and value (column data) */
+    /* For simplicity, use auto-incrementing rowid */
+    static uint64_t rowid_counter = 0;
+    uint64_t rowid = ++rowid_counter;
+
+    /* Serialize values into buffer */
+    char value_buf[1024];
+    int offset = 0;
+
+    ValueList* vl = stmt->values;
+    while (vl) {
+        for (int i = 0; i < vl->count && i < 16; i++) {
+            Expression* expr = vl->values[i];
+            if (expr->type == EXPR_LITERAL_INT) {
+                *(int64_t*)(value_buf + offset) = expr->as_int;
+                offset += sizeof(int64_t);
+            } else if (expr->type == EXPR_LITERAL_FLOAT) {
+                *(double*)(value_buf + offset) = expr->as_float;
+                offset += sizeof(double);
+            } else if (expr->type == EXPR_LITERAL_STRING && expr->as_string.str) {
+                strcpy(value_buf + offset, expr->as_string.str);
+                offset += strlen(expr->as_string.str) + 1;
+            } else {
+                /* NULL or unknown type */
+                value_buf[offset++] = 0;
+            }
+        }
+        vl = vl->next;
+    }
+
+    /* Insert into table's B+tree */
+    int ret = btree_insert(table_tree, rowid, value_buf, offset);
+    btree_close(table_tree);
+    free(table_entry);
+    return ret;
 }
 
 int executor_exec_update(Executor* exec, AstUpdate* stmt) {
@@ -475,14 +543,58 @@ Value* select_project_columns(Value* row_data, int src_column_count, ColumnList*
 
 /* Execute a SELECT statement */
 int executor_exec_select(Executor* exec, AstSelect* stmt, ResultCallback callback, void* data) {
-    (void)exec;
-    (void)stmt;
-    (void)callback;
-    (void)data;
+    if (!exec || !stmt || !stmt->table_name) return ERR_INTERNAL;
+    if (!exec->storage) return ERR_INTERNAL;
 
-    /* TODO: Implement full SELECT with storage layer scan */
-    /* For now, return empty result - will be implemented with storage integration */
+    /* Get storage components */
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    Pager* pager = storage_get_pager(exec->storage);
+    PageCache* cache = storage_get_cache(exec->storage);
+    if (!catalog || !pager || !cache) return ERR_INTERNAL;
 
+    /* Lookup table in catalog */
+    CatalogEntry* table_entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, stmt->table_name);
+    if (!table_entry) {
+        return ERR_EXEC_TABLE_NOT_FOUND;
+    }
+
+    /* Get table's B+tree - open it if we have a root page */
+    BTree* table_tree = NULL;
+    if (table_entry->root_page > 0) {
+        table_tree = btree_open(pager, cache, table_entry->root_page);
+    }
+
+    if (!table_tree) {
+        free(table_entry);
+        /* Empty table - return success with no rows */
+        return SUCCESS;
+    }
+
+    /* Scan all rows from the table's B+tree */
+    BTreeCursor* cursor = btree_first(table_tree);
+    int row_count = 0;
+    char row_buf[2048];
+
+    while (cursor && btree_cursor_valid(cursor)) {
+        uint64_t key;
+        uint32_t len;
+
+        int ret = btree_get(cursor, &key, row_buf, &len);
+        if (ret == SUCCESS && len > 0) {
+            row_count++;
+            /* Parse row data and call callback with result */
+            /* For now, just count rows - actual column parsing would go here */
+            (void)callback;
+            (void)data;
+        }
+        btree_cursor_next(cursor);
+    }
+
+    if (cursor) btree_cursor_free(cursor);
+    btree_close(table_tree);
+    free(table_entry);
+
+    /* Note: callback would be called with each row for full implementation */
     return SUCCESS;
 }
 

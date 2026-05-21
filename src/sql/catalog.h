@@ -29,6 +29,8 @@ typedef struct {
     char name[64];             /* Object name */
     char tbl_name[64];         /* Table name (for indexes) */
     char sql[512];             /* CREATE statement */
+    uint32_t root_page;        /* B+tree root page for table data */
+    int is_valid;               /* Entry is valid */
 } CatalogEntry;
 
 /*============================================================================

@@ -10,8 +10,8 @@
  * Catalog Entry Serialization
  *============================================================================*/
 
-/* Serialized format: type(4) + name(64) + tbl_name(64) + sql(512) = 644 bytes */
-#define CATALOG_ENTRY_SIZE 644
+/* Serialized format: type(4) + name(64) + tbl_name(64) + sql(512) + root_page(4) + is_valid(4) = 652 bytes */
+#define CATALOG_ENTRY_SIZE 652
 
 static int serialize_entry(const CatalogEntry* entry, void* buf) {
     if (!entry || !buf) return ERR_INTERNAL;
@@ -40,7 +40,15 @@ static int serialize_entry(const CatalogEntry* entry, void* buf) {
     }
     offset += 512;
 
-    (void)offset; /* unused - kept for clarity */
+    /* root_page: 4 bytes */
+    *(uint32_t*)(data + offset) = entry->root_page;
+    offset += 4;
+
+    /* is_valid: 4 bytes */
+    *(uint32_t*)(data + offset) = entry->is_valid ? 1 : 0;
+    offset += 4;
+
+    (void)offset;
     return SUCCESS;
 }
 
@@ -66,6 +74,14 @@ static int deserialize_entry(const void* buf, CatalogEntry* entry) {
     /* sql: 512 bytes */
     memset(entry->sql, 0, 512);
     strncpy(entry->sql, (const char*)data, 511);
+    data += 512;
+
+    /* root_page: 4 bytes */
+    entry->root_page = *(uint32_t*)data;
+    data += 4;
+
+    /* is_valid: 4 bytes */
+    entry->is_valid = *(uint32_t*)data != 0;
 
     return SUCCESS;
 }
