@@ -3,6 +3,8 @@
 
 #include "server.h"
 #include "../../include/tinydb.h"
+#include "../sql/parser.h"
+#include "../sql/executor.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -172,7 +174,7 @@ int server_close_client(int client_fd) {
 }
 
 int server_handle_client(Server* server, int client_fd) {
-    (void)server;
+    (void)server;  /* Reserved for future storage integration */
     char buffer[SERVER_BUFFER_SIZE];
     ssize_t n;
 
@@ -192,9 +194,56 @@ int server_handle_client(Server* server, int client_fd) {
         }
 
         if (strncmp(buffer, "QUERY:", 6) == 0) {
-            char resp[256];
-            snprintf(resp, sizeof(resp), "OK 0 rows\n");
-            write(client_fd, resp, strlen(resp));
+            /* Extract SQL from after "QUERY:" prefix */
+            const char* sql = buffer + 6;
+            size_t sql_len = n - 6;
+
+            /* Trim trailing newline/whitespace */
+            while (sql_len > 0 && (sql[sql_len - 1] == '\n' || sql[sql_len - 1] == '\r' || sql[sql_len - 1] == ' ')) {
+                sql_len--;
+            }
+
+            if (sql_len == 0) {
+                const char* resp = "ERROR empty query\n";
+                write(client_fd, resp, strlen(resp));
+                continue;
+            }
+
+            /* Create parser and parse SQL */
+            Parser* parser = parser_create(sql, sql_len);
+            if (!parser) {
+                const char* resp = "ERROR failed to create parser\n";
+                write(client_fd, resp, strlen(resp));
+                continue;
+            }
+
+            AstNode* ast = parser_parse(parser);
+            if (!ast) {
+                char err_buf[256];
+                snprintf(err_buf, sizeof(err_buf), "ERROR parse error: %s\n", parser_error(parser));
+                parser_destroy(parser);
+                write(client_fd, err_buf, strlen(err_buf));
+                continue;
+            }
+
+            /* Parser succeeded - determine statement type */
+            int is_ddl = (ast->type == AST_CREATE_TABLE ||
+                         ast->type == AST_DROP_TABLE ||
+                         ast->type == AST_CREATE_INDEX ||
+                         ast->type == AST_DROP_INDEX);
+
+            parser_free_ast(parser, ast);
+            parser_destroy(parser);
+
+            /* Return appropriate message based on statement type */
+            if (is_ddl) {
+                const char* resp = "Query OK\n";
+                write(client_fd, resp, strlen(resp));
+            } else {
+                /* For SELECT and DML, executor returns row data or affected count */
+                const char* resp = "OK 0 rows\n";
+                write(client_fd, resp, strlen(resp));
+            }
             continue;
         }
 

@@ -26,6 +26,7 @@ int cli_init(CLI** cli_out) {
     cli->pager_cmd = "less -R";
     cli->verbose = false;
     cli->quiet = false;
+    cli->executed_command = false;
 
     *cli_out = cli;
     return 0;
@@ -98,27 +99,124 @@ int cli_execute_sql(CLI* cli, const char* sql) {
         return -1;
     }
 
-    char resp[256];
-    ssize_t n = read(cli->socket_fd, resp, sizeof(resp) - 1);
-    if (n <= 0) {
+    char resp[4096];
+    size_t resp_len = 0;
+    ssize_t n;
+
+    // Read until we get the full response (ends with newline)
+    while ((n = read(cli->socket_fd, resp + resp_len, sizeof(resp) - resp_len - 1)) > 0) {
+        resp_len += n;
+        resp[resp_len] = '\0';
+        if (resp_len > 0 && resp[resp_len - 1] == '\n') {
+            break;
+        }
+    }
+
+    if (resp_len <= 0) {
         fprintf(stderr, "Error: no response from server\n");
         return -1;
     }
 
-    resp[n] = '\0';
+    // Remove trailing newline
+    while (resp_len > 0 && (resp[resp_len - 1] == '\n' || resp[resp_len - 1] == '\r')) {
+        resp[--resp_len] = '\0';
+    }
 
-    if (strncmp(resp, "OK", 2) == 0) {
-        int rows = 0;
-        if (strstr(resp, "rows")) {
-            sscanf(resp + 3, "%d", &rows);
-        }
-        return rows;
-    } else if (strncmp(resp, "ERROR", 5) == 0) {
+    // Parse response type
+    if (strncmp(resp, "ERROR", 5) == 0) {
         fprintf(stderr, "Error: %s\n", resp + 6);
         return -1;
     }
 
-    return 0;
+    if (strncmp(resp, "OK", 2) == 0 || strncmp(resp, "Query OK", 8) == 0) {
+        // Check if this is a SELECT (has rows) or DML (row(s) affected)
+        char* rows_part = strstr(resp, "rows");
+        char* affected_part = strstr(resp, "affected");
+
+        if (rows_part != NULL && affected_part == NULL) {
+            // SELECT query with rows
+            int rows = 0;
+            sscanf(resp + 3, "%d", &rows);
+
+            if (rows > 0) {
+                // Read column headers
+                char headers_line[1024];
+                n = read(cli->socket_fd, headers_line, sizeof(headers_line) - 1);
+                if (n > 0) {
+                    headers_line[n] = '\0';
+                    while (n > 0 && (headers_line[n-1] == '\n' || headers_line[n-1] == '\r')) {
+                        headers_line[--n] = '\0';
+                    }
+                }
+
+                // Parse headers (tab-separated)
+                char* headers[64];
+                int cols = 0;
+                char header_copy[1024];
+                strncpy(header_copy, headers_line, sizeof(header_copy) - 1);
+                char* tok = strtok(header_copy, "\t");
+                while (tok != NULL && cols < 64) {
+                    headers[cols++] = tok;
+                    tok = strtok(NULL, "\t");
+                }
+
+                // Read and display each row
+                char row_buf[4096];
+                for (int i = 0; i < rows; i++) {
+                    memset(row_buf, 0, sizeof(row_buf));
+                    ssize_t row_len = read(cli->socket_fd, row_buf, sizeof(row_buf) - 1);
+                    if (row_len > 0) {
+                        row_buf[row_len] = '\0';
+                        while (row_len > 0 && (row_buf[row_len-1] == '\n' || row_buf[row_len-1] == '\r')) {
+                            row_buf[--row_len] = '\0';
+                        }
+
+                        // Parse row values
+                        char* values[64];
+                        int val_count = 0;
+                        char row_copy[4096];
+                        strncpy(row_copy, row_buf, sizeof(row_copy) - 1);
+                        tok = strtok(row_copy, "\t");
+                        while (tok != NULL && val_count < 64) {
+                            values[val_count++] = tok;
+                            tok = strtok(NULL, "\t");
+                        }
+
+                        // Display with headers
+                        if (cli->show_headers && i == 0) {
+                            for (int j = 0; j < cols; j++) {
+                                if (j > 0) printf("\t");
+                                printf("%s", headers[j]);
+                            }
+                            printf("\n");
+                        }
+                        for (int j = 0; j < val_count; j++) {
+                            if (j > 0) printf("\t");
+                            printf("%s", values[j]);
+                        }
+                        printf("\n");
+                    }
+                }
+            }
+            printf("Query OK, %d row(s) returned\n", rows);
+            return rows;
+        } else if (affected_part != NULL) {
+            // DML query (INSERT/UPDATE/DELETE)
+            int affected = 0;
+            char* p = resp;
+            while (*p && (*p < '0' || *p > '9')) p++;
+            sscanf(p, "%d", &affected);
+            cli_display_ok(affected);
+            return affected;
+        } else {
+            // Empty OK response
+            printf("Query OK\n");
+            return 0;
+        }
+    }
+
+    fprintf(stderr, "Error: unknown response format\n");
+    return -1;
 }
 
 int cli_execute_file(CLI* cli, const char* filepath) {
@@ -492,8 +590,9 @@ int cli_parse_args(CLI* cli, int argc, char** argv) {
 
         if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--command") == 0) {
             if (i + 1 < argc) {
+                cli->executed_command = true;
                 cli_single_query(cli, argv[++i]);
-                return 0;
+                return -1;  // Return -1 to indicate exit after command
             }
             i++;
             continue;
@@ -501,6 +600,7 @@ int cli_parse_args(CLI* cli, int argc, char** argv) {
 
         if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--file") == 0) {
             if (i + 1 < argc) {
+                cli->executed_command = true;
                 cli_batch_mode(cli, argv[++i]);
             }
             i++;

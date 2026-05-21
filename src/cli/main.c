@@ -24,7 +24,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (!cli->quiet) {
+    /* Only show banner in interactive mode, not when executing commands */
+    if (!cli->quiet && !cli->executed_command && isatty(fileno(stdin))) {
         printf("TinyDB CLI v2.0.0\n");
         printf("Type \".help\" for help.\n\n");
     }

@@ -36,6 +36,7 @@ typedef struct {
     const char* pager_cmd;
     bool verbose;
     bool quiet;
+    bool executed_command;  /* Set when -c or -f is used */
 } CLI;
 
 /*============================================================================
