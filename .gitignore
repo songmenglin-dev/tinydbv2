@@ -1,0 +1,95 @@
+# Build outputs
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Binaries
+tinydb
+tinydb-cli
+db-test
+
+# Libraries (static)
+*.lib
+*.obj
+
+# Headers (generated)
+*.h.gch
+*.h.pch
+
+# Debug
+*.dSYM/
+*.gdb
+*.pdb
+
+# Release builds
+release/
+build/
+dist/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Autotools
+autom4te.cache/
+aclocal.m4
+compile
+config.*
+configure
+depcomp
+install-sh
+ltmain.sh
+missing
+stamp-h1
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Temp files
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Core dumps
+core
+core.*
+
+# Package files
+*.tar
+*.tar.gz
+*.zip
+*.tgz
+
+# Vagrant
+.vagrant/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# No gitignore - keep these directories
+# openspec/
+# .claude/
