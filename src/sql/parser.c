@@ -94,7 +94,49 @@ static void parser_set_error(Parser* parser, const char* msg) {
 /*============================================================================
  * Token helpers
  *============================================================================*/
+static int keyword_to_token_type(const char* kw) {
+    if (strcmp(kw, "INTO") == 0) return TOKEN_INTO;
+    if (strcmp(kw, "VALUES") == 0) return TOKEN_VALUES;
+    if (strcmp(kw, "FROM") == 0) return TOKEN_FROM;
+    if (strcmp(kw, "WHERE") == 0) return TOKEN_WHERE;
+    if (strcmp(kw, "AND") == 0) return TOKEN_AND;
+    if (strcmp(kw, "OR") == 0) return TOKEN_OR;
+    if (strcmp(kw, "NOT") == 0) return TOKEN_NOT;
+    if (strcmp(kw, "NULL") == 0) return TOKEN_NULL;
+    if (strcmp(kw, "LIKE") == 0) return TOKEN_LIKE;
+    if (strcmp(kw, "BETWEEN") == 0) return TOKEN_BETWEEN;
+    if (strcmp(kw, "IN") == 0) return TOKEN_IN;
+    if (strcmp(kw, "IS") == 0) return TOKEN_IS;
+    if (strcmp(kw, "SET") == 0) return TOKEN_SET;
+    if (strcmp(kw, "BEGIN") == 0) return TOKEN_BEGIN;
+    if (strcmp(kw, "COMMIT") == 0) return TOKEN_COMMIT;
+    if (strcmp(kw, "ROLLBACK") == 0) return TOKEN_ROLLBACK;
+    if (strcmp(kw, "PRIMARY") == 0) return TOKEN_PRIMARY;
+    if (strcmp(kw, "KEY") == 0) return TOKEN_KEY;
+    if (strcmp(kw, "NOT") == 0) return TOKEN_NOT;
+    if (strcmp(kw, "IF") == 0) return TOKEN_IF;
+    if (strcmp(kw, "EXISTS") == 0) return TOKEN_EXISTS;
+    if (strcmp(kw, "ORDER") == 0) return TOKEN_ORDER;
+    if (strcmp(kw, "BY") == 0) return TOKEN_BY;
+    if (strcmp(kw, "ASC") == 0) return TOKEN_ASC;
+    if (strcmp(kw, "DESC") == 0) return TOKEN_DESC;
+    if (strcmp(kw, "LIMIT") == 0) return TOKEN_LIMIT;
+    if (strcmp(kw, "OFFSET") == 0) return TOKEN_OFFSET;
+    if (strcmp(kw, "AS") == 0) return TOKEN_AS;
+    if (strcmp(kw, "ON") == 0) return TOKEN_ON;
+    if (strcmp(kw, "UNIQUE") == 0) return TOKEN_UNIQUE;
+    if (strcmp(kw, "DEFAULT") == 0) return TOKEN_DEFAULT;
+    if (strcmp(kw, "AUTOINCREMENT") == 0) return TOKEN_AUTOINCREMENT;
+    return -1;
+}
+
 static int check_keyword(Parser* parser, const char* kw) {
+    // Check if current token is the expected keyword token type
+    int expected_type = keyword_to_token_type(kw);
+    if (expected_type >= 0 && (TokenType)expected_type == parser->current_token.type) {
+        return 1;
+    }
+    // Also handle IDENTIFIER case for compatibility
     if (parser->current_token.type != TOKEN_IDENTIFIER) return 0;
     const char* text = token_get_text(&parser->current_token);
     if (!text) return 0;
