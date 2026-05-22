@@ -278,8 +278,8 @@ int server_handle_client(Server* server, int client_fd) {
             /* Execute statement through executor if storage is available */
             int exec_result = SUCCESS;
             int row_count = 0;
-            AstNodeType saved_type = AST_SELECT;  /* Save type BEFORE executor call */
-            char* select_result_buf = NULL;  /* Buffer for SELECT row data */
+            AstNodeType saved_type = AST_SELECT;
+            SelectResult sel_result = {0};
 
             if (ast) saved_type = ast->type;
 
@@ -290,27 +290,11 @@ int server_handle_client(Server* server, int client_fd) {
                 SERVER_DEBUG_PRINT("[SERVER] executor_create returned exec=%p\n", (void*)exec);
                 if (exec) {
                     SERVER_DEBUG_PRINT("[SERVER] Calling executor_exec type=%d\n", saved_type);
-                    /* For SELECT, pass pointer to receive result buffer */
-                    if (saved_type == AST_SELECT) {
-                        char** result_ptr = &select_result_buf;
-                        exec_result = executor_exec(exec, ast, NULL, &result_ptr);
-                    } else {
-                        exec_result = executor_exec(exec, ast, NULL, NULL);
-                    }
+                    exec_result = executor_exec(exec, ast, NULL, &sel_result);
                     SERVER_DEBUG_PRINT("[SERVER] executor_exec returned result=%d\n", exec_result);
                     SERVER_DEBUG_PRINT("[SERVER] Calling executor_destroy\n");
                     executor_destroy(exec);
                     SERVER_DEBUG_PRINT("[SERVER] executor_destroy returned\n");
-
-                    /* Save AST info BEFORE freeing */
-                    AstNodeType type_for_rows = saved_type;
-                    char* table_name_for_select = NULL;
-                    if (saved_type == AST_SELECT && exec_result == SUCCESS) {
-                        AstSelect* select = (AstSelect*)ast;
-                        if (select->table_name) {
-                            table_name_for_select = strdup(select->table_name);
-                        }
-                    }
 
                     SERVER_DEBUG_PRINT("[SERVER] Calling parser_free_ast\n");
                     parser_free_ast(parser, ast);
@@ -319,42 +303,14 @@ int server_handle_client(Server* server, int client_fd) {
                     parser_destroy(parser);
                     SERVER_DEBUG_PRINT("[SERVER] parser_destroy returned\n");
 
-                    if (type_for_rows == AST_SELECT && exec_result == SUCCESS && table_name_for_select) {
-                        Catalog* catalog = storage_get_catalog(server->storage);
-                        if (catalog) {
-                            CatalogEntry* entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, table_name_for_select);
-                            if (entry && entry->root_page > 0) {
-                                Pager* pager = storage_get_pager(server->storage);
-                                PageCache* cache = storage_get_cache(server->storage);
-                                if (pager && cache) {
-                                    BTree* tree = btree_open(pager, cache, entry->root_page);
-                                    if (tree) {
-                                        BTreeCursor* cursor = btree_first(tree);
-                                        char row_buf[2048];
-                                        while (cursor && btree_cursor_valid(cursor)) {
-                                            uint64_t key;
-                                            uint32_t len;
-                                            if (btree_get(cursor, &key, row_buf, &len) == SUCCESS && len > 0) {
-                                                row_count++;
-                                            }
-                                            btree_cursor_next(cursor);
-                                        }
-                                        if (cursor) btree_cursor_free(cursor);
-                                        btree_close(tree);
-                                    }
-                                }
-                            }
-                            if (entry) free(entry);
-                        }
-                        free(table_name_for_select);
-                    } else if (type_for_rows == AST_INSERT && exec_result == SUCCESS) {
+                    /* Determine row count (executor already scanned for SELECT) */
+                    if (saved_type == AST_SELECT && exec_result == SUCCESS) {
+                        row_count = (int)sel_result.row_count;
+                    } else if (saved_type == AST_INSERT && exec_result == SUCCESS) {
                         row_count = 1;
                     } else if (exec_result == SUCCESS) {
                         row_count = 1;
                     }
-
-                    SERVER_DEBUG_PRINT("[SERVER] Building response resp_buf\n");
-                    /* NOTE: executor_destroy already called above */
                 } else {
                     exec_result = ERR_INTERNAL;
                 }
@@ -377,10 +333,11 @@ int server_handle_client(Server* server, int client_fd) {
                 SERVER_DEBUG_PRINT("[SERVER] write SELECT OK done\n");
 
                 /* Then send ROW: lines if we have data */
-                if (select_result_buf && strlen(select_result_buf) > 0) {
+                if (sel_result.result_buf && sel_result.result_len > 0) {
                     SERVER_DEBUG_PRINT("[SERVER] Calling write for ROW data\n");
-                    write(client_fd, select_result_buf, strlen(select_result_buf));
+                    write(client_fd, sel_result.result_buf, sel_result.result_len);
                     SERVER_DEBUG_PRINT("[SERVER] write ROW data done\n");
+                    free(sel_result.result_buf);
                 }
 
                 /* Send END to mark end of data */
@@ -388,8 +345,6 @@ int server_handle_client(Server* server, int client_fd) {
                 SERVER_DEBUG_PRINT("[SERVER] Calling write for END\n");
                 write(client_fd, end_marker, strlen(end_marker));
                 SERVER_DEBUG_PRINT("[SERVER] write END done\n");
-
-                if (select_result_buf) free(select_result_buf);
             } else {
                 snprintf(resp_buf, sizeof(resp_buf), "Query OK, %d row(s) affected\n", row_count);
                 SERVER_DEBUG_PRINT("[SERVER] Calling write for DML OK\n");

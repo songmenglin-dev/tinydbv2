@@ -722,31 +722,25 @@ static int split_leaf_page(BTree* tree, Page* page, int cell_count,
     page_mark_dirty(new_page);
 
     int remaining_cells = original_count - cells_to_move;
-    if (remaining_cells > 0) {
-        uint16_t new_content_start = BTREE_LEAF_HEADER_SIZE + remaining_cells * BTREE_CELL_POINTER_SIZE;
-        uint16_t new_data_start = PAGE_SIZE;
+    /* new_data_start tracks where the content area begins after compaction */
+    uint16_t new_data_start = PAGE_SIZE;
 
+    if (remaining_cells > 0) {
+        /* Compact remaining cells to bottom of page */
         for (int i = remaining_cells - 1; i >= 0; i--) {
-            int src_idx = i;
-            uint16_t src_ptr = get_cell_pointer(page->data, src_idx);
+            uint16_t src_ptr = get_cell_pointer(page->data, i);
 
             if (src_ptr < BTREE_LEAF_HEADER_SIZE || src_ptr >= PAGE_SIZE) {
                 page_unpin(new_page);
                 return -1;
             }
 
-            uint32_t payload_size = read_u32(page->data, src_ptr);
-            uint32_t cell_size = payload_size + 8;
+            uint32_t pl = read_u32(page->data, src_ptr);
+            uint32_t cs = pl + 8;
 
-            if (cell_size > (uint32_t)new_data_start ||
-                (uint32_t)(new_data_start - cell_size) < (uint32_t)new_content_start) {
-                page_unpin(new_page);
-                return -1;
-            }
-
-            new_data_start -= cell_size;
+            new_data_start = (uint16_t)(new_data_start - cs);
             memcpy((uint8_t*)page->data + new_data_start,
-                   (uint8_t*)page->data + src_ptr, cell_size);
+                   (uint8_t*)page->data + src_ptr, cs);
             set_cell_pointer(page->data, i, new_data_start);
         }
     }
@@ -754,14 +748,14 @@ static int split_leaf_page(BTree* tree, Page* page, int cell_count,
     BTreeNodeHeader header;
     header.page_type = BTREE_PAGE_TYPE_LEAF;
     header.cell_count = remaining_cells;
-    header.content_start = (remaining_cells > 0) ?
-        (BTREE_LEAF_HEADER_SIZE + remaining_cells * BTREE_CELL_POINTER_SIZE) : PAGE_SIZE;
+    header.content_start = new_data_start;
     header.fragmented_bytes = 0;
     set_node_header(page->data, &header);
     set_right_sibling(page->data, new_page_num);
     page_mark_dirty(page);
     page_unpin(new_page);
 
+    /* Re-pin current page to ensure cursor is valid */
     page = page_pin(tree->cache, cursor->page);
     if (!page) {
         return -1;

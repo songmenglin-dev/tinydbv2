@@ -109,7 +109,7 @@ int cli_execute_sql(CLI* cli, const char* sql) {
         resp_len += n;
         resp[resp_len] = '\0';
         // Check for END marker to know when data is complete
-        if (resp_len > 4 && strstr(resp, "\nEND\n") != NULL) {
+        if (resp_len > 3 && strstr(resp, "\nEND\n") != NULL) {
             break;
         }
         // Also break on regular OK response without row data
@@ -124,10 +124,16 @@ int cli_execute_sql(CLI* cli, const char* sql) {
         return -1;
     }
 
-    // Remove trailing newline
+    // Remove trailing newlines only (preserve END marker)
+    // Don't trim past "\nEND\n" so that strstr(resp, "\nEND\n") still works
     while (resp_len > 0 && (resp[resp_len - 1] == '\n' || resp[resp_len - 1] == '\r')) {
-        resp[--resp_len] = '\0';
+        if (resp_len >= 5 && strncmp(resp + resp_len - 4, "END\n", 4) == 0) {
+            // Stop trimming - we need the final \n before END
+            break;
+        }
+        resp_len--;
     }
+    resp[resp_len] = '\0';
 
     // Parse response type
     if (strncmp(resp, "ERROR", 5) == 0) {
@@ -147,38 +153,44 @@ int cli_execute_sql(CLI* cli, const char* sql) {
             printf("Query OK, %d row(s) returned\n", rows);
 
             /* Extract and display row data from ROW: lines */
-            /* First, find the last "OK N row(s) returned\n" in the response */
-            char* data_start = strstr(resp, "\nOK ");
-            if (data_start) {
-                data_start++;  /* Skip the newline before OK */
-                /* Terminate string at start of row data */
-                char* end = strstr(data_start, "\nEND");
-                if (end) {
-                    *end = '\0';
-                    /* Skip past "OK N row(s) returned\n" */
-                    char* line_start = strchr(data_start, '\n');
-                    if (line_start) {
-                        line_start++;  /* Skip newline after OK line */
-                        /* Process each ROW: line */
-                        char* line = line_start;
-                        while (line && *line) {
-                            char* next_line = strchr(line, '\n');
-                            if (next_line) *next_line = '\0';
+            /* Protocol: OK N row(s) returned\n, ROW: lines, \nEND\n */
+            /* Find the OK line and END marker */
+            char* ok_line = strstr(resp, "OK ");
+            char* end_marker = strstr(resp, "\nEND\n");
 
-                            /* Parse ROW:col1\tcol2\tcol3 format */
-                            if (strncmp(line, "ROW:", 4) == 0) {
-                                char* cols = line + 4;
-                                /* Replace tabs with spaces for display */
-                                char* p = cols;
-                                while (*p) {
-                                    if (*p == '\t') *p = ' ';
-                                    p++;
-                                }
-                                printf("%s\n", cols);
-                            }
-                            line = next_line ? next_line + 1 : NULL;
+            if (ok_line && end_marker) {
+                /* Terminate at end marker */
+                *end_marker = '\0';
+
+                /* Find the newline after OK line to get to row data */
+                char* line_start = strchr(ok_line, '\n');
+                if (line_start) {
+                    line_start++;  /* Skip the newline */
+                } else {
+                    /* No newline after OK line - find end of OK line */
+                    line_start = ok_line;
+                    while (*line_start && *line_start != '\n') line_start++;
+                    if (*line_start == '\n') line_start++;
+                }
+
+                /* Process each ROW: line */
+                char* line = line_start;
+                while (line && *line) {
+                    char* next_line = strchr(line, '\n');
+                    if (next_line) *next_line = '\0';
+
+                    /* Parse ROW:col1\tcol2\tcol3 format */
+                    if (strncmp(line, "ROW:", 4) == 0) {
+                        char* cols = line + 4;
+                        /* Replace tabs with spaces for display */
+                        char* p = cols;
+                        while (*p) {
+                            if (*p == '\t') *p = ' ';
+                            p++;
                         }
+                        printf("%s\n", cols);
                     }
+                    line = next_line ? next_line + 1 : NULL;
                 }
             }
             return rows;

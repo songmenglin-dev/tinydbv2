@@ -90,6 +90,15 @@ int executor_exec_delete(Executor* exec, AstDelete* stmt);
 /* SELECT */
 int executor_exec_select(Executor* exec, AstSelect* stmt, ResultCallback callback, void* data);
 
+/*============================================================================
+ * SELECT result structure (passed via data for server communication)
+ *============================================================================*/
+typedef struct SelectResult {
+    char*   result_buf;   /* Formatted ROW: lines */
+    size_t  result_len;   /* Length of result_buf */
+    int64_t row_count;    /* Number of rows returned */
+} SelectResult;
+
 /* BEGIN */
 int executor_exec_begin(Executor* exec, AstTransaction* stmt);
 

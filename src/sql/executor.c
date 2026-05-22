@@ -298,7 +298,8 @@ int executor_exec_insert(Executor* exec, AstInsert* stmt) {
     static _Atomic uint64_t rowid_counter = 0;
     uint64_t rowid = ++rowid_counter;
 
-    /* Serialize values into buffer */
+    /* Serialize values into buffer: type_byte(1) + length(4) + data(variable) per value */
+    /* type: 1=integer, 2=float, 3=string, 0=null */
     char value_buf[1024];
     int offset = 0;
 
@@ -307,22 +308,31 @@ int executor_exec_insert(Executor* exec, AstInsert* stmt) {
         for (int i = 0; i < vl->count && i < 16; i++) {
             Expression* expr = vl->values[i];
             if (expr->type == EXPR_LITERAL_INT) {
+                value_buf[offset++] = 1;  /* type = integer */
+                *(uint32_t*)(value_buf + offset) = sizeof(int64_t);
+                offset += 4;
                 *(int64_t*)(value_buf + offset) = expr->as_int;
                 offset += sizeof(int64_t);
             } else if (expr->type == EXPR_LITERAL_FLOAT) {
+                value_buf[offset++] = 2;  /* type = float */
+                *(uint32_t*)(value_buf + offset) = sizeof(double);
+                offset += 4;
                 *(double*)(value_buf + offset) = expr->as_float;
                 offset += sizeof(double);
             } else if (expr->type == EXPR_LITERAL_STRING && expr->as_string.str) {
                 size_t slen = strlen(expr->as_string.str);
-                size_t remaining = sizeof(value_buf) - offset;
-                if (slen >= remaining) slen = remaining - 1;
+                size_t remaining = sizeof(value_buf) - offset - 5;
+                if (slen > remaining) slen = remaining;
+                value_buf[offset++] = 3;  /* type = string */
+                *(uint32_t*)(value_buf + offset) = (uint32_t)slen;
+                offset += 4;
                 memcpy(value_buf + offset, expr->as_string.str, slen);
                 offset += slen;
-                value_buf[offset] = '\0';
-                offset++;
             } else {
                 /* NULL or unknown type */
                 value_buf[offset++] = 0;
+                *(uint32_t*)(value_buf + offset) = 0;
+                offset += 4;
             }
         }
         vl = vl->next;
@@ -611,50 +621,62 @@ int executor_exec_select(Executor* exec, AstSelect* stmt, ResultCallback callbac
             row_count++;
 
             /* Deserialize row data and format as tab-separated string */
-            /* Format: key (rowid) followed by column values */
-            char line_buf[4096];
+            /* row_buf starts directly with first column's type byte (no rowid prefix)
+             * Format: [type(1) + len(4) + data(n)] per column, repeated */
+            char line_buf[4096] = {0};
             int offset = 0;
             int col_idx = 0;
 
-            /* Read rowid first */
-            if (len >= sizeof(uint64_t)) {
-                uint64_t rowid = *(uint64_t*)row_buf;
-                offset += sizeof(uint64_t);
+            /* Read column values using length-prefixed format:
+             * each value is: type_byte(1) + length(4) + data(variable)
+             * type: 1=integer, 2=float, 3=string, 0=null/terminator */
+            while (offset < (int)len && col_idx < 16) {
+                if ((size_t)offset + 5 > len) break;
+                uint8_t col_type = (uint8_t)row_buf[offset];
+                uint32_t col_len = *(uint32_t*)(row_buf + offset + 1);
 
-                /* Format: rowid as first column */
-                size_t remaining = sizeof(line_buf) - offset;
-                offset += snprintf(line_buf + offset, remaining, "%llu", (unsigned long long)rowid);
+                if (col_type == 0 || col_len == 0) break;
+                if ((size_t)offset + 5 + col_len > len) break;
 
-                /* Try to read column values - assume at least some data */
-                while (offset < (int)len && col_idx < 16) {
-                    /* Try to determine type and read value */
-                    remaining = sizeof(line_buf) - offset;
-                    if (offset + sizeof(int64_t) <= (size_t)len) {
-                        int64_t int_val = *(int64_t*)(row_buf + offset);
-                        offset += sizeof(int64_t);
-                        offset += snprintf(line_buf + offset, remaining, "\t%lld", (long long)int_val);
-                        col_idx++;
-                    } else if (offset + sizeof(double) <= (size_t)len) {
-                        double float_val = *(double*)(row_buf + offset);
-                        offset += sizeof(double);
-                        offset += snprintf(line_buf + offset, remaining, "\t%g", float_val);
-                        col_idx++;
+                offset += 5;  /* skip type + length */
+                size_t used = strlen(line_buf);
+
+                if (col_type == 1 && col_len == sizeof(int64_t)) {
+                    int64_t int_val = *(int64_t*)(row_buf + offset);
+                    offset += sizeof(int64_t);
+                    if (used > 0) {
+                        snprintf(line_buf + used, sizeof(line_buf) - used, "\t%lld", (long long)int_val);
                     } else {
-                        /* Try to read as null-terminated string */
-                        char* str_val = row_buf + offset;
-                        size_t str_len = strlen(str_val);
-                        if (str_len > 0 && offset + str_len + 1 <= (size_t)len) {
-                            offset += str_len + 1;
-                            offset += snprintf(line_buf + offset, remaining, "\t%s", str_val);
-                            col_idx++;
-                        } else {
-                            break;
-                        }
+                        snprintf(line_buf + used, sizeof(line_buf) - used, "%lld", (long long)int_val);
                     }
+                    col_idx++;
+                } else if (col_type == 2 && col_len == sizeof(double)) {
+                    double float_val = *(double*)(row_buf + offset);
+                    offset += sizeof(double);
+                    if (used > 0) {
+                        snprintf(line_buf + used, sizeof(line_buf) - used, "\t%g", float_val);
+                    } else {
+                        snprintf(line_buf + used, sizeof(line_buf) - used, "%g", float_val);
+                    }
+                    col_idx++;
+                } else if (col_type == 3) {
+                    char str_buf[1024];
+                    size_t copy_len = col_len < sizeof(str_buf) - 1 ? col_len : sizeof(str_buf) - 1;
+                    memcpy(str_buf, row_buf + offset, copy_len);
+                    str_buf[copy_len] = '\0';
+                    offset += col_len;
+                    if (used > 0) {
+                        snprintf(line_buf + used, sizeof(line_buf) - used, "\t%s", str_buf);
+                    } else {
+                        snprintf(line_buf + used, sizeof(line_buf) - used, "%s", str_buf);
+                    }
+                    col_idx++;
+                } else {
+                    offset += col_len;
                 }
             }
 
-            /* Append ROW: line to result buffer - preallocate to avoid O(n^2) */
+            /* Append ROW: line to result buffer */
             size_t line_len = strlen(line_buf);
             size_t needed = result_len + line_len + 16;
             if (result_capacity < needed) {
@@ -672,11 +694,15 @@ int executor_exec_select(Executor* exec, AstSelect* stmt, ResultCallback callbac
     btree_close(table_tree);
     free(table_entry);
 
+    /* Track rows in executor stats for server to retrieve */
+    exec->rows_read += row_count;
+
     /* Store result buffer in data for server to retrieve */
     if (data && result_buf) {
-        /* data is actually char** - the pointer to select_result_buf */
-        char** result_ptr = (char**)data;
-        *result_ptr = result_buf;
+        SelectResult* sel_result = (SelectResult*)data;
+        sel_result->result_buf = result_buf;
+        sel_result->result_len = result_len;
+        sel_result->row_count = row_count;
     } else if (result_buf) {
         free(result_buf);
     }
