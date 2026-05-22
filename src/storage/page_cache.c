@@ -225,7 +225,7 @@ PageCache* page_cache_create(int max_pages, struct Pager* pager) {
     cache->lru_tail = NULL;
 
     pthread_mutex_init(&cache->mutex, NULL);
-    // pthread_rwlock_init(&cache->rwlock, NULL);
+    pthread_rwlock_init(&cache->rwlock, NULL);
 
     return cache;
 }
@@ -248,7 +248,7 @@ void page_cache_destroy(PageCache* cache) {
 
     free(cache->pages);
     pthread_mutex_destroy(&cache->mutex);
-    // pthread_rwlock_destroy(&cache->rwlock);
+    pthread_rwlock_destroy(&cache->rwlock);
     free(cache);
 }
 
@@ -259,7 +259,7 @@ void page_cache_destroy(PageCache* cache) {
 Page* page_cache_get(PageCache* cache, uint32_t page_id) {
     if (!cache) return NULL;
 
-    // pthread_rwlock_rdlock(&cache->rwlock);
+    pthread_rwlock_rdlock(&cache->rwlock);
 
     /* Look up in hash table */
     Page* page = hash_find(cache, page_id);
@@ -270,13 +270,13 @@ Page* page_cache_get(PageCache* cache, uint32_t page_id) {
         lru_mru(cache, page);
         page->refcount++;
         cache->pin_count++;
-        // pthread_rwlock_unlock(&cache->rwlock);
+        pthread_rwlock_unlock(&cache->rwlock);
         return page;
     }
 
     /* Cache miss */
     cache->miss_count++;
-    // pthread_rwlock_unlock(&cache->rwlock);
+    pthread_rwlock_unlock(&cache->rwlock);
 
     /* Need to load page from disk */
     if (!cache->pager) {
@@ -284,7 +284,7 @@ Page* page_cache_get(PageCache* cache, uint32_t page_id) {
     }
 
     /* Acquire write lock to insert new page */
-    // pthread_rwlock_wrlock(&cache->rwlock);
+    pthread_rwlock_wrlock(&cache->rwlock);
 
     /* Check again (another thread may have inserted it) */
     page = hash_find(cache, page_id);
@@ -293,14 +293,14 @@ Page* page_cache_get(PageCache* cache, uint32_t page_id) {
         lru_mru(cache, page);
         page->refcount++;
         cache->pin_count++;
-        // pthread_rwlock_unlock(&cache->rwlock);
+        pthread_rwlock_unlock(&cache->rwlock);
         return page;
     }
 
     /* Evict if necessary */
     while (cache->count >= cache->max_pages) {
         if (evict_lru_page(cache) < 0) {
-            // pthread_rwlock_unlock(&cache->rwlock);
+            pthread_rwlock_unlock(&cache->rwlock);
             return NULL;
         }
     }
@@ -308,14 +308,14 @@ Page* page_cache_get(PageCache* cache, uint32_t page_id) {
     /* Allocate new page */
     page = page_alloc(page_id);
     if (!page) {
-        // pthread_rwlock_unlock(&cache->rwlock);
+        pthread_rwlock_unlock(&cache->rwlock);
         return NULL;
     }
 
     /* Read page from disk */
     if (pager_read_page(cache->pager, page_id, page->data) < 0) {
         page_free(page);
-        // pthread_rwlock_unlock(&cache->rwlock);
+        pthread_rwlock_unlock(&cache->rwlock);
         return NULL;
     }
 
@@ -327,7 +327,7 @@ Page* page_cache_get(PageCache* cache, uint32_t page_id) {
     page->refcount = 1;
     cache->pin_count++;
 
-    // pthread_rwlock_unlock(&cache->rwlock);
+    pthread_rwlock_unlock(&cache->rwlock);
     return page;
 }
 
@@ -367,23 +367,33 @@ void page_cache_release(PageCache* cache, Page* page) {
 int page_cache_flush(PageCache* cache) {
     if (!cache) return -1;
 
-    pthread_mutex_lock(&cache->mutex);
+    /* Collect dirty pages under lock, then flush outside lock */
+    uint32_t dirty_pages[256];
+    int dirty_count = 0;
 
-    int flushed = 0;
-    for (int i = 0; i < cache->table_size; i++) {
+    pthread_mutex_lock(&cache->mutex);
+    for (int i = 0; i < cache->table_size && dirty_count < 256; i++) {
         Page* p = cache->pages[i];
-        while (p) {
-            if (p->is_dirty && cache->pager) {
-                if (pager_write_page(cache->pager, p->id, p->data) == 0) {
-                    p->is_dirty = 0;
-                    flushed++;
-                }
+        while (p && dirty_count < 256) {
+            if (p->is_dirty) {
+                dirty_pages[dirty_count++] = p->id;
             }
             p = p->hash_next;
         }
     }
-
     pthread_mutex_unlock(&cache->mutex);
+
+    /* Flush pages without holding lock */
+    int flushed = 0;
+    for (int i = 0; i < dirty_count; i++) {
+        Page* page = hash_find(cache, dirty_pages[i]);
+        if (page && page->is_dirty && cache->pager) {
+            if (pager_write_page(cache->pager, page->id, page->data) == 0) {
+                page->is_dirty = 0;
+                flushed++;
+            }
+        }
+    }
     return flushed;
 }
 
@@ -416,23 +426,23 @@ int page_cache_flush_page(PageCache* cache, uint32_t page_id) {
 int page_cache_evict(PageCache* cache, uint32_t page_id) {
     if (!cache) return -1;
 
-    // pthread_rwlock_wrlock(&cache->rwlock);
+    pthread_rwlock_wrlock(&cache->rwlock);
 
     Page* page = hash_find(cache, page_id);
     if (!page) {
-        // pthread_rwlock_unlock(&cache->rwlock);
+        pthread_rwlock_unlock(&cache->rwlock);
         return -1;
     }
 
     if (page->refcount > 0) {
-        // pthread_rwlock_unlock(&cache->rwlock);
+        pthread_rwlock_unlock(&cache->rwlock);
         return -1;  /* Cannot evict pinned page */
     }
 
     /* Flush if dirty */
     if (page->is_dirty && cache->pager) {
         if (pager_write_page(cache->pager, page->id, page->data) < 0) {
-            // pthread_rwlock_unlock(&cache->rwlock);
+            pthread_rwlock_unlock(&cache->rwlock);
             return -1;
         }
     }
@@ -444,14 +454,14 @@ int page_cache_evict(PageCache* cache, uint32_t page_id) {
 
     page_free(page);
 
-    // pthread_rwlock_unlock(&cache->rwlock);
+    pthread_rwlock_unlock(&cache->rwlock);
     return 0;
 }
 
 void page_cache_clear(PageCache* cache) {
     if (!cache) return;
 
-    // pthread_rwlock_wrlock(&cache->rwlock);
+    pthread_rwlock_wrlock(&cache->rwlock);
 
     for (int i = 0; i < cache->table_size; i++) {
         Page* p = cache->pages[i];
@@ -474,7 +484,7 @@ void page_cache_clear(PageCache* cache) {
     cache->lru_head = NULL;
     cache->lru_tail = NULL;
 
-    // pthread_rwlock_unlock(&cache->rwlock);
+    pthread_rwlock_unlock(&cache->rwlock);
 }
 
 /*============================================================================

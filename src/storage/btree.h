@@ -37,6 +37,15 @@ typedef struct __attribute__((packed)) {
     uint8_t fragmented_bytes;  /* Number of fragmented free bytes */
 } BTreeNodeHeader;
 
+/* B+Tree leaf page header (14 bytes) - includes right sibling pointer */
+typedef struct __attribute__((packed)) {
+    uint8_t page_type;         /* Page type (leaf = 0x0D) */
+    uint16_t cell_count;       /* Number of cells in this page */
+    uint16_t content_start;    /* Offset to start of cell content area */
+    uint8_t fragmented_bytes;  /* Number of fragmented free bytes */
+    uint32_t right_sibling;    /* Page number of next leaf (0 if none) */
+} BTreeLeafHeader;
+
 /* B+Tree internal node header (14 bytes) - extends leaf header */
 typedef struct __attribute__((packed)) {
     uint8_t page_type;         /* Page type (leaf or internal) */

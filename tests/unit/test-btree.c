@@ -19,6 +19,13 @@ test(btree_cursor_last);
 test(btree_cursor_valid);
 test(btree_get_and_peek);
 test(btree_range_scan);
+test(btree_delete_basic);
+test(btree_delete_nonexistent);
+test(btree_update_existing);
+test(btree_find_nonexistent);
+test(btree_cursor_prev);
+test(btree_multiple_inserts);
+test(btree_page_split);
 
 /*============================================================================
  * Test file path helper
@@ -282,6 +289,230 @@ test(btree_range_scan) {
     free(path);
 }
 
+test(btree_delete_basic) {
+    char* path = get_test_db_path("btree_delete");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Insert a key-value */
+    btree_insert(tree, 42, "answer", 6);
+
+    /* Verify it exists */
+    BTreeCursor* cursor = btree_find(tree, 42);
+    assert_non_null(cursor);
+    assert_eq(btree_cursor_valid(cursor), 1);
+    btree_cursor_free(cursor);
+
+    /* Delete it */
+    assert_eq(btree_delete(tree, 42), 0);
+
+    /* Verify it's gone */
+    cursor = btree_find(tree, 42);
+    assert_non_null(cursor);
+    assert_eq(btree_cursor_valid(cursor), 0);
+    btree_cursor_free(cursor);
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+test(btree_delete_nonexistent) {
+    char* path = get_test_db_path("btree_delete_nonexist");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Delete non-existent key returns -1 (key not found) */
+    assert_eq(btree_delete(tree, 999), -1);
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+test(btree_update_existing) {
+    char* path = get_test_db_path("btree_update");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Insert initial value */
+    btree_insert(tree, 1, "original", 8);
+
+    /* Update with new value */
+    assert_eq(btree_update(tree, 1, "updated", 7), 0);
+
+    /* Verify updated value */
+    BTreeCursor* cursor = btree_find(tree, 1);
+    assert_non_null(cursor);
+    uint64_t key;
+    char buf[256];
+    uint32_t len;
+    assert_eq(btree_get(cursor, &key, buf, &len), 0);
+    assert_eq(len, 7);
+    assert_mem_eq(buf, "updated", 7);
+    btree_cursor_free(cursor);
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+test(btree_find_nonexistent) {
+    char* path = get_test_db_path("btree_find_nonexist");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Insert some keys */
+    btree_insert(tree, 10, "ten", 3);
+    btree_insert(tree, 20, "twenty", 6);
+
+    /* Find non-existent key */
+    BTreeCursor* cursor = btree_find(tree, 99);
+    assert_non_null(cursor);
+    assert_eq(btree_cursor_valid(cursor), 0);
+    btree_cursor_free(cursor);
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+test(btree_cursor_prev) {
+    char* path = get_test_db_path("btree_prev");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Insert keys */
+    btree_insert(tree, 10, "a", 1);
+    btree_insert(tree, 20, "b", 1);
+    btree_insert(tree, 30, "c", 1);
+
+    /* Get last then move backward */
+    BTreeCursor* cursor = btree_last(tree);
+    assert_non_null(cursor);
+    assert_eq(btree_cursor_valid(cursor), 1);
+
+    btree_cursor_prev(cursor);
+    assert_eq(btree_cursor_valid(cursor), 1);
+
+    btree_cursor_free(cursor);
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+test(btree_multiple_inserts) {
+    char* path = get_test_db_path("btree_multiple");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Insert 100 keys */
+    for (int i = 0; i < 100; i++) {
+        char val[16];
+        snprintf(val, sizeof(val), "val%d", i);
+        assert_eq(btree_insert(tree, i, val, strlen(val)), 0);
+    }
+
+    /* Verify all can be found */
+    for (int i = 0; i < 100; i++) {
+        BTreeCursor* cursor = btree_find(tree, i);
+        assert_non_null(cursor);
+        assert_eq(btree_cursor_valid(cursor), 1);
+        btree_cursor_free(cursor);
+    }
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+test(btree_page_split) {
+    char* path = get_test_db_path("btree_split");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Insert many keys to trigger page splits */
+    for (int i = 0; i < 50; i++) {
+        char val[64];
+        snprintf(val, sizeof(val), "value_for_key_%d_this_is_a_long_value_to_fill_pages", i);
+        assert_eq(btree_insert(tree, i, val, strlen(val)), 0);
+    }
+
+    /* Verify tree still works correctly */
+    BTreeCursor* cursor = btree_first(tree);
+    assert_non_null(cursor);
+    assert_eq(btree_cursor_valid(cursor), 1);
+
+    /* Iterate through all keys */
+    int count = 0;
+    while (btree_cursor_valid(cursor)) {
+        count++;
+        btree_cursor_next(cursor);
+    }
+    assert_eq(count, 50);
+    btree_cursor_free(cursor);
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
 /*============================================================================
  * Test runner
  *============================================================================*/
@@ -308,6 +539,13 @@ int main(int argc, char** argv) {
         run(btree_cursor_valid);
         run(btree_get_and_peek);
         run(btree_range_scan);
+        run(btree_delete_basic);
+        run(btree_delete_nonexistent);
+        run(btree_update_existing);
+        run(btree_find_nonexistent);
+        run(btree_cursor_prev);
+        run(btree_multiple_inserts);
+        run(btree_page_split);
 
         printf("\nAll btree unit tests passed!\n");
     }
