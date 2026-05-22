@@ -28,6 +28,8 @@ typedef struct {
     char lock_file[256];
     bool running;
     int client_count;
+    bool auth_enabled;
+    char auth_file[256];
 } Server;
 
 /*============================================================================

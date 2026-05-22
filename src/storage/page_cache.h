@@ -58,7 +58,7 @@ typedef struct PageCache {
 
     /* Thread safety */
     pthread_mutex_t mutex;
-    /* pthread_rwlock_t rwlock;  Read-write lock for page access - temporarily disabled */
+    pthread_rwlock_t rwlock;  /* Read-write lock for page access */
 
     /* Statistics */
     int pin_count;           /* Current pins */
