@@ -37,6 +37,7 @@ typedef struct {
     bool verbose;
     bool quiet;
     bool executed_command;  /* Set when -c or -f is used */
+    char socket_path[256];   /* Stored socket path for reuse */
 } CLI;
 
 /*============================================================================

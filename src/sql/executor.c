@@ -61,9 +61,11 @@ ResultSet* result_set_create(int initial_capacity) {
 
 int result_set_add_row(ResultSet* rs, Value* row) {
     if (rs->row_count >= rs->capacity) {
-        rs->capacity *= 2;
-        rs->rows = realloc(rs->rows, sizeof(Value*) * rs->capacity);
-        if (!rs->rows) return -1;
+        size_t new_capacity = rs->capacity * 2;
+        void* new_rows = realloc(rs->rows, sizeof(Value*) * new_capacity);
+        if (!new_rows) return -1;
+        rs->rows = new_rows;
+        rs->capacity = new_capacity;
     }
     rs->rows[rs->row_count++] = row;
     return 0;
@@ -221,7 +223,6 @@ int executor_exec_create_table(Executor* exec, AstCreateTable* stmt) {
     BTree* table_tree = btree_create(pager, cache);
     if (!table_tree) return ERR_STORAGE_IO;
     uint32_t root_page = table_tree->root_page;  /* Get root page from created tree */
-    btree_close(table_tree);  /* Close tree but keep pages allocated */
 
     /* Create catalog entry */
     CatalogEntry entry;
@@ -271,7 +272,9 @@ int executor_exec_insert(Executor* exec, AstInsert* stmt) {
     Catalog* catalog = storage_get_catalog(exec->storage);
     Pager* pager = storage_get_pager(exec->storage);
     PageCache* cache = storage_get_cache(exec->storage);
-    if (!catalog || !pager || !cache) return ERR_INTERNAL;
+    if (!catalog || !pager || !cache) {
+        return ERR_INTERNAL;
+    }
 
     /* Lookup table in catalog */
     CatalogEntry* table_entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, stmt->table_name);
@@ -292,7 +295,7 @@ int executor_exec_insert(Executor* exec, AstInsert* stmt) {
 
     /* Serialize row data: interleave key (rowid) and value (column data) */
     /* For simplicity, use auto-incrementing rowid */
-    static uint64_t rowid_counter = 0;
+    static _Atomic uint64_t rowid_counter = 0;
     uint64_t rowid = ++rowid_counter;
 
     /* Serialize values into buffer */
@@ -310,8 +313,13 @@ int executor_exec_insert(Executor* exec, AstInsert* stmt) {
                 *(double*)(value_buf + offset) = expr->as_float;
                 offset += sizeof(double);
             } else if (expr->type == EXPR_LITERAL_STRING && expr->as_string.str) {
-                strcpy(value_buf + offset, expr->as_string.str);
-                offset += strlen(expr->as_string.str) + 1;
+                size_t slen = strlen(expr->as_string.str);
+                size_t remaining = sizeof(value_buf) - offset;
+                if (slen >= remaining) slen = remaining - 1;
+                memcpy(value_buf + offset, expr->as_string.str, slen);
+                offset += slen;
+                value_buf[offset] = '\0';
+                offset++;
             } else {
                 /* NULL or unknown type */
                 value_buf[offset++] = 0;
@@ -322,9 +330,14 @@ int executor_exec_insert(Executor* exec, AstInsert* stmt) {
 
     /* Insert into table's B+tree */
     int ret = btree_insert(table_tree, rowid, value_buf, offset);
+    if (ret != SUCCESS) {
+        btree_close(table_tree);
+        free(table_entry);
+        return ret;
+    }
     btree_close(table_tree);
     free(table_entry);
-    return ret;
+    return SUCCESS;
 }
 
 int executor_exec_update(Executor* exec, AstUpdate* stmt) {
@@ -543,8 +556,16 @@ Value* select_project_columns(Value* row_data, int src_column_count, ColumnList*
 
 /* Execute a SELECT statement */
 int executor_exec_select(Executor* exec, AstSelect* stmt, ResultCallback callback, void* data) {
-    if (!exec || !stmt || !stmt->table_name) return ERR_INTERNAL;
+    if (!exec || !stmt) return ERR_INTERNAL;
     if (!exec->storage) return ERR_INTERNAL;
+
+    /* Handle scalar SELECT (no table) */
+    if (!stmt->table_name) {
+        /* Scalar SELECT like SELECT 1 - just return success with 1 row */
+        (void)callback;
+        (void)data;
+        return SUCCESS;
+    }
 
     /* Get storage components */
     Catalog* catalog = storage_get_catalog(exec->storage);
@@ -570,22 +591,79 @@ int executor_exec_select(Executor* exec, AstSelect* stmt, ResultCallback callbac
         return SUCCESS;
     }
 
-    /* Scan all rows from the table's B+tree */
+    /* Scan all rows from the table's B+tree and collect data */
     BTreeCursor* cursor = btree_first(table_tree);
     int row_count = 0;
-    char row_buf[2048];
+
+    /* Buffer to accumulate all row data for server to send */
+    /* Format: "ROW:col1\tcol2\tcol3\n" per row */
+    char* result_buf = NULL;
+    size_t result_len = 0;
+    size_t result_capacity = 0;
 
     while (cursor && btree_cursor_valid(cursor)) {
         uint64_t key;
         uint32_t len;
+        char row_buf[2048];
 
         int ret = btree_get(cursor, &key, row_buf, &len);
         if (ret == SUCCESS && len > 0) {
             row_count++;
-            /* Parse row data and call callback with result */
-            /* For now, just count rows - actual column parsing would go here */
-            (void)callback;
-            (void)data;
+
+            /* Deserialize row data and format as tab-separated string */
+            /* Format: key (rowid) followed by column values */
+            char line_buf[4096];
+            int offset = 0;
+            int col_idx = 0;
+
+            /* Read rowid first */
+            if (len >= sizeof(uint64_t)) {
+                uint64_t rowid = *(uint64_t*)row_buf;
+                offset += sizeof(uint64_t);
+
+                /* Format: rowid as first column */
+                size_t remaining = sizeof(line_buf) - offset;
+                offset += snprintf(line_buf + offset, remaining, "%llu", (unsigned long long)rowid);
+
+                /* Try to read column values - assume at least some data */
+                while (offset < (int)len && col_idx < 16) {
+                    /* Try to determine type and read value */
+                    remaining = sizeof(line_buf) - offset;
+                    if (offset + sizeof(int64_t) <= (size_t)len) {
+                        int64_t int_val = *(int64_t*)(row_buf + offset);
+                        offset += sizeof(int64_t);
+                        offset += snprintf(line_buf + offset, remaining, "\t%lld", (long long)int_val);
+                        col_idx++;
+                    } else if (offset + sizeof(double) <= (size_t)len) {
+                        double float_val = *(double*)(row_buf + offset);
+                        offset += sizeof(double);
+                        offset += snprintf(line_buf + offset, remaining, "\t%g", float_val);
+                        col_idx++;
+                    } else {
+                        /* Try to read as null-terminated string */
+                        char* str_val = row_buf + offset;
+                        size_t str_len = strlen(str_val);
+                        if (str_len > 0 && offset + str_len + 1 <= (size_t)len) {
+                            offset += str_len + 1;
+                            offset += snprintf(line_buf + offset, remaining, "\t%s", str_val);
+                            col_idx++;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            /* Append ROW: line to result buffer - preallocate to avoid O(n^2) */
+            size_t line_len = strlen(line_buf);
+            size_t needed = result_len + line_len + 16;
+            if (result_capacity < needed) {
+                size_t new_cap = result_capacity == 0 ? 4096 : result_capacity * 2;
+                if (new_cap < needed) new_cap = needed;
+                result_buf = realloc(result_buf, new_cap);
+                result_capacity = new_cap;
+            }
+            result_len += snprintf(result_buf + result_len, result_capacity - result_len, "ROW:%s\n", line_buf);
         }
         btree_cursor_next(cursor);
     }
@@ -593,6 +671,15 @@ int executor_exec_select(Executor* exec, AstSelect* stmt, ResultCallback callbac
     if (cursor) btree_cursor_free(cursor);
     btree_close(table_tree);
     free(table_entry);
+
+    /* Store result buffer in data for server to retrieve */
+    if (data && result_buf) {
+        /* data is actually char** - the pointer to select_result_buf */
+        char** result_ptr = (char**)data;
+        *result_ptr = result_buf;
+    } else if (result_buf) {
+        free(result_buf);
+    }
 
     /* Note: callback would be called with each row for full implementation */
     return SUCCESS;

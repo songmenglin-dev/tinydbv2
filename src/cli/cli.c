@@ -57,7 +57,8 @@ int cli_connect(CLI* cli, const char* socket_path) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strcpy(addr.sun_path, socket_path);
+    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+    addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
 
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(fd);
@@ -103,11 +104,17 @@ int cli_execute_sql(CLI* cli, const char* sql) {
     size_t resp_len = 0;
     ssize_t n;
 
-    // Read until we get the full response (ends with newline)
+    // Read until we get the full response (ends with newline or END marker)
     while ((n = read(cli->socket_fd, resp + resp_len, sizeof(resp) - resp_len - 1)) > 0) {
         resp_len += n;
         resp[resp_len] = '\0';
-        if (resp_len > 0 && resp[resp_len - 1] == '\n') {
+        // Check for END marker to know when data is complete
+        if (resp_len > 4 && strstr(resp, "\nEND\n") != NULL) {
+            break;
+        }
+        // Also break on regular OK response without row data
+        if (resp_len > 0 && resp[resp_len - 1] == '\n' &&
+            strstr(resp, "row(s)") != NULL && strstr(resp, "ROW:") == NULL) {
             break;
         }
     }
@@ -129,76 +136,51 @@ int cli_execute_sql(CLI* cli, const char* sql) {
     }
 
     if (strncmp(resp, "OK", 2) == 0 || strncmp(resp, "Query OK", 8) == 0) {
-        // Check if this is a SELECT (has rows) or DML (row(s) affected)
-        char* rows_part = strstr(resp, "rows");
+        // Check if this is a SELECT (has "returned") or DML (has "affected")
+        char* returned_part = strstr(resp, "returned");
         char* affected_part = strstr(resp, "affected");
 
-        if (rows_part != NULL && affected_part == NULL) {
-            // SELECT query with rows
+        if (returned_part != NULL) {
+            // SELECT query - parse row count from "OK N row(s) returned"
             int rows = 0;
             sscanf(resp + 3, "%d", &rows);
+            printf("Query OK, %d row(s) returned\n", rows);
 
-            if (rows > 0) {
-                // Read column headers
-                char headers_line[1024];
-                n = read(cli->socket_fd, headers_line, sizeof(headers_line) - 1);
-                if (n > 0) {
-                    headers_line[n] = '\0';
-                    while (n > 0 && (headers_line[n-1] == '\n' || headers_line[n-1] == '\r')) {
-                        headers_line[--n] = '\0';
-                    }
-                }
+            /* Extract and display row data from ROW: lines */
+            /* First, find the last "OK N row(s) returned\n" in the response */
+            char* data_start = strstr(resp, "\nOK ");
+            if (data_start) {
+                data_start++;  /* Skip the newline before OK */
+                /* Terminate string at start of row data */
+                char* end = strstr(data_start, "\nEND");
+                if (end) {
+                    *end = '\0';
+                    /* Skip past "OK N row(s) returned\n" */
+                    char* line_start = strchr(data_start, '\n');
+                    if (line_start) {
+                        line_start++;  /* Skip newline after OK line */
+                        /* Process each ROW: line */
+                        char* line = line_start;
+                        while (line && *line) {
+                            char* next_line = strchr(line, '\n');
+                            if (next_line) *next_line = '\0';
 
-                // Parse headers (tab-separated)
-                char* headers[64];
-                int cols = 0;
-                char header_copy[1024];
-                strncpy(header_copy, headers_line, sizeof(header_copy) - 1);
-                char* tok = strtok(header_copy, "\t");
-                while (tok != NULL && cols < 64) {
-                    headers[cols++] = tok;
-                    tok = strtok(NULL, "\t");
-                }
-
-                // Read and display each row
-                char row_buf[4096];
-                for (int i = 0; i < rows; i++) {
-                    memset(row_buf, 0, sizeof(row_buf));
-                    ssize_t row_len = read(cli->socket_fd, row_buf, sizeof(row_buf) - 1);
-                    if (row_len > 0) {
-                        row_buf[row_len] = '\0';
-                        while (row_len > 0 && (row_buf[row_len-1] == '\n' || row_buf[row_len-1] == '\r')) {
-                            row_buf[--row_len] = '\0';
-                        }
-
-                        // Parse row values
-                        char* values[64];
-                        int val_count = 0;
-                        char row_copy[4096];
-                        strncpy(row_copy, row_buf, sizeof(row_copy) - 1);
-                        tok = strtok(row_copy, "\t");
-                        while (tok != NULL && val_count < 64) {
-                            values[val_count++] = tok;
-                            tok = strtok(NULL, "\t");
-                        }
-
-                        // Display with headers
-                        if (cli->show_headers && i == 0) {
-                            for (int j = 0; j < cols; j++) {
-                                if (j > 0) printf("\t");
-                                printf("%s", headers[j]);
+                            /* Parse ROW:col1\tcol2\tcol3 format */
+                            if (strncmp(line, "ROW:", 4) == 0) {
+                                char* cols = line + 4;
+                                /* Replace tabs with spaces for display */
+                                char* p = cols;
+                                while (*p) {
+                                    if (*p == '\t') *p = ' ';
+                                    p++;
+                                }
+                                printf("%s\n", cols);
                             }
-                            printf("\n");
+                            line = next_line ? next_line + 1 : NULL;
                         }
-                        for (int j = 0; j < val_count; j++) {
-                            if (j > 0) printf("\t");
-                            printf("%s", values[j]);
-                        }
-                        printf("\n");
                     }
                 }
             }
-            printf("Query OK, %d row(s) returned\n", rows);
             return rows;
         } else if (affected_part != NULL) {
             // DML query (INSERT/UPDATE/DELETE)
@@ -536,16 +518,39 @@ int cli_handle_meta_command(CLI* cli, const char* cmd) {
     }
 
     if (strncmp(cmd, ".shell", 6) == 0) {
+        /* Validate shell command - only allow safe characters */
+        const char* arg = cmd + 6;
+        while (*arg == ' ') arg++;  /* skip leading spaces */
+        size_t arg_len = strlen(arg);
+        if (arg_len == 0 || arg_len > 255) {
+            printf("Error: invalid shell command\n");
+            return 0;
+        }
+        /* Check for dangerous characters */
+        for (size_t i = 0; i < arg_len; i++) {
+            char c = arg[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == ' ' || c == '-' ||
+                  c == '_' || c == '.' || c == '/' || c == ':')) {
+                printf("Error: invalid characters in shell command\n");
+                return 0;
+            }
+        }
         char shell_cmd[256] = {0};
-        sscanf(cmd + 6, "%255s", shell_cmd);
+        snprintf(shell_cmd, sizeof(shell_cmd), "%s", arg);
         system(shell_cmd);
         return 0;
     }
 
     if (strncmp(cmd, ".read", 5) == 0) {
-        char filepath[256] = {0};
-        sscanf(cmd + 5, "%255s", filepath);
-        cli_execute_file(cli, filepath);
+        const char* arg = cmd + 5;
+        while (*arg == ' ') arg++;  /* skip leading spaces */
+        /* Validate path - prevent path traversal */
+        if (strstr(arg, "..") != NULL) {
+            printf("Error: invalid characters in path\n");
+            return 0;
+        }
+        cli_execute_file(cli, arg);
         return 0;
     }
 

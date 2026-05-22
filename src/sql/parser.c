@@ -95,10 +95,26 @@ static void parser_set_error(Parser* parser, const char* msg) {
  * Token helpers
  *============================================================================*/
 static int keyword_to_token_type(const char* kw) {
-    if (strcmp(kw, "INTO") == 0) return TOKEN_INTO;
-    if (strcmp(kw, "VALUES") == 0) return TOKEN_VALUES;
+    if (strcmp(kw, "SELECT") == 0) return TOKEN_SELECT;
+    if (strcmp(kw, "DISTINCT") == 0) return TOKEN_DISTINCT;
     if (strcmp(kw, "FROM") == 0) return TOKEN_FROM;
     if (strcmp(kw, "WHERE") == 0) return TOKEN_WHERE;
+    if (strcmp(kw, "ORDER") == 0) return TOKEN_ORDER;
+    if (strcmp(kw, "BY") == 0) return TOKEN_BY;
+    if (strcmp(kw, "ASC") == 0) return TOKEN_ASC;
+    if (strcmp(kw, "DESC") == 0) return TOKEN_DESC;
+    if (strcmp(kw, "LIMIT") == 0) return TOKEN_LIMIT;
+    if (strcmp(kw, "OFFSET") == 0) return TOKEN_OFFSET;
+    if (strcmp(kw, "INTO") == 0) return TOKEN_INTO;
+    if (strcmp(kw, "VALUES") == 0) return TOKEN_VALUES;
+    if (strcmp(kw, "INSERT") == 0) return TOKEN_INSERT;
+    if (strcmp(kw, "UPDATE") == 0) return TOKEN_UPDATE;
+    if (strcmp(kw, "DELETE") == 0) return TOKEN_DELETE;
+    if (strcmp(kw, "SET") == 0) return TOKEN_SET;
+    if (strcmp(kw, "CREATE") == 0) return TOKEN_CREATE;
+    if (strcmp(kw, "DROP") == 0) return TOKEN_DROP;
+    if (strcmp(kw, "TABLE") == 0) return TOKEN_TABLE;
+    if (strcmp(kw, "INDEX") == 0) return TOKEN_INDEX;
     if (strcmp(kw, "AND") == 0) return TOKEN_AND;
     if (strcmp(kw, "OR") == 0) return TOKEN_OR;
     if (strcmp(kw, "NOT") == 0) return TOKEN_NOT;
@@ -107,21 +123,13 @@ static int keyword_to_token_type(const char* kw) {
     if (strcmp(kw, "BETWEEN") == 0) return TOKEN_BETWEEN;
     if (strcmp(kw, "IN") == 0) return TOKEN_IN;
     if (strcmp(kw, "IS") == 0) return TOKEN_IS;
-    if (strcmp(kw, "SET") == 0) return TOKEN_SET;
     if (strcmp(kw, "BEGIN") == 0) return TOKEN_BEGIN;
     if (strcmp(kw, "COMMIT") == 0) return TOKEN_COMMIT;
     if (strcmp(kw, "ROLLBACK") == 0) return TOKEN_ROLLBACK;
     if (strcmp(kw, "PRIMARY") == 0) return TOKEN_PRIMARY;
     if (strcmp(kw, "KEY") == 0) return TOKEN_KEY;
-    if (strcmp(kw, "NOT") == 0) return TOKEN_NOT;
     if (strcmp(kw, "IF") == 0) return TOKEN_IF;
     if (strcmp(kw, "EXISTS") == 0) return TOKEN_EXISTS;
-    if (strcmp(kw, "ORDER") == 0) return TOKEN_ORDER;
-    if (strcmp(kw, "BY") == 0) return TOKEN_BY;
-    if (strcmp(kw, "ASC") == 0) return TOKEN_ASC;
-    if (strcmp(kw, "DESC") == 0) return TOKEN_DESC;
-    if (strcmp(kw, "LIMIT") == 0) return TOKEN_LIMIT;
-    if (strcmp(kw, "OFFSET") == 0) return TOKEN_OFFSET;
     if (strcmp(kw, "AS") == 0) return TOKEN_AS;
     if (strcmp(kw, "ON") == 0) return TOKEN_ON;
     if (strcmp(kw, "UNIQUE") == 0) return TOKEN_UNIQUE;
@@ -518,8 +526,6 @@ static AstNode* parse_statement(Parser* parser) {
             }
             parser_set_error(parser, "Expected TABLE or INDEX after DROP");
             return NULL;
-            parser_set_error(parser, "Expected TABLE or INDEX after DROP");
-            return NULL;
 
         case TOKEN_INSERT:
             return parse_insert(parser);
@@ -847,6 +853,12 @@ static AstNode* parse_insert(Parser* parser) {
         if (!exprs) {
             free(table_name);
             /* Free columns */
+            while (columns) {
+                ColumnList* next = columns->next;
+                free(columns->name);
+                free(columns);
+                columns = next;
+            }
             return NULL;
         }
 
@@ -889,6 +901,14 @@ static AstNode* parse_update(Parser* parser) {
     while (!parser->has_error) {
         char* col_name = parse_identifier(parser);
         if (!col_name) {
+            /* Free accumulated clauses */
+            while (clauses) {
+                SetClause* next = clauses->next;
+                free(clauses->column_name);
+                expr_unref(clauses->value);
+                free(clauses);
+                clauses = next;
+            }
             free(table_name);
             return NULL;
         }
@@ -897,6 +917,14 @@ static AstNode* parse_update(Parser* parser) {
 
         Expression* value = parse_expression(parser);
         if (!value) {
+            /* Free accumulated clauses */
+            while (clauses) {
+                SetClause* next = clauses->next;
+                free(clauses->column_name);
+                expr_unref(clauses->value);
+                free(clauses);
+                clauses = next;
+            }
             free(col_name);
             free(table_name);
             return NULL;
@@ -979,6 +1007,16 @@ static ColumnList* parse_column_list(Parser* parser) {
             /* SELECT * - special case */
             ColumnList* col = calloc(1, sizeof(ColumnList));
             col->name = strdup("*");
+            *tail = col;
+            tail = &col->next;
+            advance(parser);
+            break;
+        }
+
+        /* Check for literal values (numbers) */
+        if (parser->current_token.type == TOKEN_INTEGER || parser->current_token.type == TOKEN_STRING) {
+            ColumnList* col = calloc(1, sizeof(ColumnList));
+            col->name = strdup(token_get_text(&parser->current_token));
             *tail = col;
             tail = &col->next;
             advance(parser);
@@ -1073,11 +1111,22 @@ static AstNode* parse_select(Parser* parser) {
         return NULL;
     }
 
-    /* FROM clause */
+    /* Check for SELECT without FROM (scalar expression like SELECT 1) */
     if (parser->current_token.type != TOKEN_FROM) {
-        parser_set_error(parser, "Expected FROM after SELECT columns");
-        return NULL;
+        /* This is a scalar SELECT - create a special AST node */
+        AstSelect* select = calloc(1, sizeof(AstSelect));
+        select->base.type = AST_SELECT;
+        select->columns = columns;
+        select->table_name = NULL;  /* No table for scalar SELECT */
+        select->where = NULL;
+        select->order_by = NULL;
+        select->limit = NULL;
+        select->offset = NULL;
+        select->is_distinct = is_distinct;
+        return &select->base;
     }
+
+    /* Has FROM clause - continue with normal parsing */
     advance(parser);
 
     char* table_name = parse_identifier(parser);

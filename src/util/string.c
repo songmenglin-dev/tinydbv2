@@ -83,7 +83,7 @@ size_t str_cpy(char* dest, size_t dest_size, const char* src) {
 
 size_t str_ncpy(char* dest, size_t dest_size, const char* src, size_t src_len) {
     if (!dest || !src || dest_size == 0) return 0;
-    size_t actual_src_len = src_len;
+    size_t actual_src_len = str_nlen(src, src_len);
     size_t copy_len = actual_src_len < dest_size - 1 ? actual_src_len : dest_size - 1;
     memcpy(dest, src, copy_len);
     dest[copy_len] = '\0';
