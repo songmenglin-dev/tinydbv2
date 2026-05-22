@@ -132,4 +132,53 @@ SPECS → BRAINSTORM (brainstorming) → DESIGN (writing-plans) → TASKS →
   → AGENTS (subagent-driven-development) → IMPLEMENT → VALIDATE → COMMIT
 ```
 
-**Agent role matching:** Architecture → `architect`, Dev → `engineering-senior-developer`, Review → `code-reviewer`, Test → `e2e-runner`, Security → `security-reviewer`, Docs → `doc-updater`
+**Agent role matching:** Architecture → `architect`, Dev → `c-pro`, Review → `code-reviewer`, Test → `e2e-runner`, Security → `security-reviewer`, Docs → `doc-updater`
+
+---
+
+## 8. Subagent Expert Configuration
+
+Use specialized subagents for professional tasks instead of general-purpose.
+
+### Expert Subagent Mapping
+
+| Task Type        | Subagent                              | Trigger Keywords                                        |
+| ---------------- | ------------------------------------- | ------------------------------------------------------- |
+| C/系统开发       | `c-pro`                               | C语言, 系统编程, 嵌入式, 性能, 内存管理               |
+| 前端/UI开发      | `engineering-frontend-developer`       | 前端, React, Vue, UI, 组件, CSS, 样式                 |
+| 后端/架构        | `engineering-backend-architect`       | 后端, API, 架构, 服务, 微服务                          |
+| 数据工程         | `engineering-data-engineer`           | 数据, ETL, pipeline, 数据流                            |
+| 安全分析         | `engineering-security-engineer`       | 安全, 漏洞, 认证, 授权, 加密                            |
+| 移动端           | `engineering-mobile-app-builder`     | 移动端, iOS, Android, App                              |
+| DevOps/部署      | `engineering-devops-automator`        | 部署, CI/CD, Docker, K8s, 运维                         |
+| 性能优化         | `engineering-autonomous-optimization-architect` | 性能, 优化, 缓存, 延迟                        |
+| 代码审查         | `engineering-code-reviewer`           | 审查, review, 检查代码                                 |
+| 数据库           | `engineering-database-optimizer`       | 数据库, SQL, 索引, 查询优化                            |
+| 架构设计         | `engineering-software-architect`       | 架构, 设计模式, 系统设计                               |
+| SRE/可观测性     | `engineering-sre`                      | 监控, SRE, 可观测性, SLO                               |
+| 威胁检测         | `engineering-threat-detection-engineer` | 威胁检测, SIEM, 威胁狩猎                               |
+
+### Usage Rules
+
+1. **优先使用专家**: When task matches an expert, use the corresponding subagent
+2. **不要默认 general-purpose**: Don't default to general-purpose when an expert is available
+3. **组合任务拆解**: Complex tasks should be split into parallel expert subtasks
+4. **显式指定**: Follow user's explicit subagent preference when specified
+
+### C Language Development (c-pro)
+
+For TinyDB v2 C codebase:
+- **Always use `c-pro`** for C language tasks
+- Use for: storage layer, parser, executor, server, CLI development
+- Includes: memory safety, pointer arithmetic, build fixes
+- Priority: Use before general-purpose for C tasks
+
+### Call Example
+
+```bash
+Agent({
+  description: "B+tree storage development",
+  prompt: "Implement btree_delete() function...",
+  subagent_type: "c-pro"  # Use c-pro for C tasks
+})
+```
