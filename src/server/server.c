@@ -5,6 +5,9 @@
 #include "../../include/tinydb.h"
 #include "../sql/parser.h"
 #include "../sql/executor.h"
+#include "../sql/storage.h"
+#include "../sql/catalog.h"
+#include "../storage/btree.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +17,12 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+
+#ifdef SERVER_DEBUG
+#define SERVER_DEBUG_PRINT(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define SERVER_DEBUG_PRINT(...) ((void)0)
+#endif
 
 static Server* g_server = NULL;
 
@@ -97,6 +106,10 @@ int server_init(Server** server_out) {
     snprintf(server->pid_file, sizeof(server->pid_file), "/run/tinydb/tinydb.pid");
     snprintf(server->lock_file, sizeof(server->lock_file), "/run/tinydb/tinydb.lock");
 
+    /* Check if auth is enabled via environment variable */
+    server->auth_enabled = (getenv("TINYDB_AUTH_PASSWORD") != NULL);
+    server->auth_file[0] = '\0';
+
     *server_out = server;
     return 0;
 }
@@ -178,6 +191,41 @@ int server_handle_client(Server* server, int client_fd) {
     char buffer[SERVER_BUFFER_SIZE];
     ssize_t n;
 
+    /* Check if auth is required - if so, require AUTH: command first */
+    if (server->auth_enabled) {
+        n = read(client_fd, buffer, sizeof(buffer) - 1);
+        if (n <= 0) return 0;
+        buffer[n] = '\0';
+
+        /* Check for AUTH: command */
+        if (strncmp(buffer, "AUTH:", 5) != 0) {
+            const char* resp = "ERROR authentication required\n";
+            write(client_fd, resp, strlen(resp));
+            return 0;
+        }
+
+        /* Simple password check - in production use hashed passwords */
+        const char* expected_pw = getenv("TINYDB_AUTH_PASSWORD");
+        if (expected_pw == NULL) expected_pw = "tinydb_default";  /* fallback */
+
+        /* Compare password (without trailing newline) */
+        size_t pw_len = n - 5;
+        while (pw_len > 0 && (buffer[5 + pw_len - 1] == '\n' || buffer[5 + pw_len - 1] == '\r')) {
+            pw_len--;
+        }
+
+        if (pw_len != strlen(expected_pw) ||
+            strncmp(buffer + 5, expected_pw, pw_len) != 0) {
+            const char* resp = "ERROR authentication failed\n";
+            write(client_fd, resp, strlen(resp));
+            return 0;
+        }
+
+        /* Auth successful - send OK */
+        const char* resp = "OK auth\n";
+        write(client_fd, resp, strlen(resp));
+    }
+
     while ((n = read(client_fd, buffer, sizeof(buffer) - 1)) > 0) {
         buffer[n] = '\0';
 
@@ -226,24 +274,129 @@ int server_handle_client(Server* server, int client_fd) {
                 continue;
             }
 
-            /* Parser succeeded - determine statement type */
-            int is_ddl = (ast->type == AST_CREATE_TABLE ||
-                         ast->type == AST_DROP_TABLE ||
-                         ast->type == AST_CREATE_INDEX ||
-                         ast->type == AST_DROP_INDEX);
+            SERVER_DEBUG_PRINT("[SERVER] Parsed SQL: ast=%p type=%d\n", (void*)ast, ast->type);
+            /* Execute statement through executor if storage is available */
+            int exec_result = SUCCESS;
+            int row_count = 0;
+            AstNodeType saved_type = AST_SELECT;  /* Save type BEFORE executor call */
+            char* select_result_buf = NULL;  /* Buffer for SELECT row data */
 
-            parser_free_ast(parser, ast);
-            parser_destroy(parser);
+            if (ast) saved_type = ast->type;
 
-            /* Return appropriate message based on statement type */
-            if (is_ddl) {
-                const char* resp = "Query OK\n";
-                write(client_fd, resp, strlen(resp));
+            SERVER_DEBUG_PRINT("[SERVER] Before executor_create storage=%p\n", (void*)server->storage);
+            if (server->storage != NULL) {
+                SERVER_DEBUG_PRINT("[SERVER] Creating executor\n");
+                Executor* exec = executor_create(server->storage);
+                SERVER_DEBUG_PRINT("[SERVER] executor_create returned exec=%p\n", (void*)exec);
+                if (exec) {
+                    SERVER_DEBUG_PRINT("[SERVER] Calling executor_exec type=%d\n", saved_type);
+                    /* For SELECT, pass pointer to receive result buffer */
+                    if (saved_type == AST_SELECT) {
+                        char** result_ptr = &select_result_buf;
+                        exec_result = executor_exec(exec, ast, NULL, &result_ptr);
+                    } else {
+                        exec_result = executor_exec(exec, ast, NULL, NULL);
+                    }
+                    SERVER_DEBUG_PRINT("[SERVER] executor_exec returned result=%d\n", exec_result);
+                    SERVER_DEBUG_PRINT("[SERVER] Calling executor_destroy\n");
+                    executor_destroy(exec);
+                    SERVER_DEBUG_PRINT("[SERVER] executor_destroy returned\n");
+
+                    /* Save AST info BEFORE freeing */
+                    AstNodeType type_for_rows = saved_type;
+                    char* table_name_for_select = NULL;
+                    if (saved_type == AST_SELECT && exec_result == SUCCESS) {
+                        AstSelect* select = (AstSelect*)ast;
+                        if (select->table_name) {
+                            table_name_for_select = strdup(select->table_name);
+                        }
+                    }
+
+                    SERVER_DEBUG_PRINT("[SERVER] Calling parser_free_ast\n");
+                    parser_free_ast(parser, ast);
+                    SERVER_DEBUG_PRINT("[SERVER] parser_free_ast returned\n");
+                    SERVER_DEBUG_PRINT("[SERVER] Calling parser_destroy\n");
+                    parser_destroy(parser);
+                    SERVER_DEBUG_PRINT("[SERVER] parser_destroy returned\n");
+
+                    if (type_for_rows == AST_SELECT && exec_result == SUCCESS && table_name_for_select) {
+                        Catalog* catalog = storage_get_catalog(server->storage);
+                        if (catalog) {
+                            CatalogEntry* entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, table_name_for_select);
+                            if (entry && entry->root_page > 0) {
+                                Pager* pager = storage_get_pager(server->storage);
+                                PageCache* cache = storage_get_cache(server->storage);
+                                if (pager && cache) {
+                                    BTree* tree = btree_open(pager, cache, entry->root_page);
+                                    if (tree) {
+                                        BTreeCursor* cursor = btree_first(tree);
+                                        char row_buf[2048];
+                                        while (cursor && btree_cursor_valid(cursor)) {
+                                            uint64_t key;
+                                            uint32_t len;
+                                            if (btree_get(cursor, &key, row_buf, &len) == SUCCESS && len > 0) {
+                                                row_count++;
+                                            }
+                                            btree_cursor_next(cursor);
+                                        }
+                                        if (cursor) btree_cursor_free(cursor);
+                                        btree_close(tree);
+                                    }
+                                }
+                            }
+                            if (entry) free(entry);
+                        }
+                        free(table_name_for_select);
+                    } else if (type_for_rows == AST_INSERT && exec_result == SUCCESS) {
+                        row_count = 1;
+                    } else if (exec_result == SUCCESS) {
+                        row_count = 1;
+                    }
+
+                    SERVER_DEBUG_PRINT("[SERVER] Building response resp_buf\n");
+                    /* NOTE: executor_destroy already called above */
+                } else {
+                    exec_result = ERR_INTERNAL;
+                }
             } else {
-                /* For SELECT and DML, executor returns row data or affected count */
-                const char* resp = "OK 0 rows\n";
-                write(client_fd, resp, strlen(resp));
+                exec_result = ERR_INTERNAL;
             }
+
+            char resp_buf[128];
+            SERVER_DEBUG_PRINT("[SERVER] Response: exec_result=%d saved_type=%d row_count=%d\n", exec_result, saved_type, row_count);
+            if (exec_result != SUCCESS) {
+                snprintf(resp_buf, sizeof(resp_buf), "ERROR execution failed (%d)\n", exec_result);
+                SERVER_DEBUG_PRINT("[SERVER] Calling write for ERROR\n");
+                write(client_fd, resp_buf, strlen(resp_buf));
+                SERVER_DEBUG_PRINT("[SERVER] write ERROR done\n");
+            } else if (saved_type == AST_SELECT) {
+                /* Send OK with row count first */
+                snprintf(resp_buf, sizeof(resp_buf), "OK %d row(s) returned\n", row_count);
+                SERVER_DEBUG_PRINT("[SERVER] Calling write for SELECT OK\n");
+                write(client_fd, resp_buf, strlen(resp_buf));
+                SERVER_DEBUG_PRINT("[SERVER] write SELECT OK done\n");
+
+                /* Then send ROW: lines if we have data */
+                if (select_result_buf && strlen(select_result_buf) > 0) {
+                    SERVER_DEBUG_PRINT("[SERVER] Calling write for ROW data\n");
+                    write(client_fd, select_result_buf, strlen(select_result_buf));
+                    SERVER_DEBUG_PRINT("[SERVER] write ROW data done\n");
+                }
+
+                /* Send END to mark end of data */
+                const char* end_marker = "END\n";
+                SERVER_DEBUG_PRINT("[SERVER] Calling write for END\n");
+                write(client_fd, end_marker, strlen(end_marker));
+                SERVER_DEBUG_PRINT("[SERVER] write END done\n");
+
+                if (select_result_buf) free(select_result_buf);
+            } else {
+                snprintf(resp_buf, sizeof(resp_buf), "Query OK, %d row(s) affected\n", row_count);
+                SERVER_DEBUG_PRINT("[SERVER] Calling write for DML OK\n");
+                write(client_fd, resp_buf, strlen(resp_buf));
+                SERVER_DEBUG_PRINT("[SERVER] write DML OK done\n");
+            }
+            SERVER_DEBUG_PRINT("[SERVER] Response sent, continuing\n");
             continue;
         }
 

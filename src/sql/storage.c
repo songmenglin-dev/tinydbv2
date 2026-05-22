@@ -82,6 +82,16 @@ int tinydb_open(Storage** storage, const char* path) {
         return ERR_STORAGE_IO;
     }
 
+    /* Initialize catalog with tinydb_master entry */
+    if (catalog_init(s->catalog) != SUCCESS) {
+        catalog_close(s->catalog);
+        page_cache_destroy(s->cache);
+        pager_close(s->pager);
+        free(s->path);
+        free(s);
+        return ERR_INTERNAL;
+    }
+
     s->is_open = 1;
     *storage = s;
     return SUCCESS;

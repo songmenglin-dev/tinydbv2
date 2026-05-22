@@ -79,15 +79,29 @@ static void set_node_header(void* page_data, BTreeNodeHeader* header) {
     write_u8(page_data, 5, header->fragmented_bytes);
 }
 
-/* Get cell pointer at index */
+/* Get right sibling page number from leaf page */
+static uint32_t get_right_sibling(void* page_data) {
+    return read_u32(page_data, 6);
+}
+
+/* Set right sibling page number in leaf page */
+static void set_right_sibling(void* page_data, uint32_t page_num) {
+    write_u32(page_data, 6, page_num);
+}
+
+/* Get cell pointer at index - auto-detects page type from first byte */
 static uint16_t get_cell_pointer(void* page_data, int index) {
-    off_t offset = BTREE_LEAF_HEADER_SIZE + index * BTREE_CELL_POINTER_SIZE;
+    uint8_t page_type = read_u8(page_data, 0);
+    int header_size = (page_type == BTREE_PAGE_TYPE_INTERNAL) ? BTREE_INTERNAL_HEADER_SIZE : BTREE_LEAF_HEADER_SIZE;
+    off_t offset = header_size + index * BTREE_CELL_POINTER_SIZE;
     return read_u16(page_data, offset);
 }
 
-/* Set cell pointer at index */
+/* Set cell pointer at index - auto-detects page type from first byte */
 static void set_cell_pointer(void* page_data, int index, uint16_t value) {
-    off_t offset = BTREE_LEAF_HEADER_SIZE + index * BTREE_CELL_POINTER_SIZE;
+    uint8_t page_type = read_u8(page_data, 0);
+    int header_size = (page_type == BTREE_PAGE_TYPE_INTERNAL) ? BTREE_INTERNAL_HEADER_SIZE : BTREE_LEAF_HEADER_SIZE;
+    off_t offset = header_size + index * BTREE_CELL_POINTER_SIZE;
     write_u16(page_data, offset, value);
 }
 
@@ -162,6 +176,7 @@ BTree* btree_create(Pager* pager, PageCache* cache) {
     write_u16(page->data, 1, 0);  /* cell_count = 0 */
     write_u16(page->data, 3, PAGE_SIZE);  /* content_start = end of page */
     write_u8(page->data, 5, 0);  /* fragmented_bytes = 0 */
+    write_u32(page->data, 6, 0);  /* right_sibling = 0 (none) */
 
     page_mark_dirty(page);
     page_unpin(page);
@@ -265,18 +280,31 @@ BTreeCursor* btree_find(BTree* tree, uint64_t key) {
             cursor->depth = depth + 1;
             cursor->page = page_num;
 
-            /* Find cell with key */
+            /* Find cell with key using binary search */
             int cell_count = header.cell_count;
             int found = -1;
 
-            for (int i = 0; i < cell_count; i++) {
-                off_t cell_offset = get_cell_pointer(page->data, i);
-                uint32_t key_size = read_u32(page->data, cell_offset + 4);
+            if (cell_count > 0) {
+                int left = 0;
+                int right = cell_count - 1;
 
-                if (key_size == sizeof(uint64_t)) {
-                    uint64_t* cell_key = (uint64_t*)((uint8_t*)page->data + cell_offset + 8);
-                    if (*cell_key == key) {
-                        found = i;
+                while (left <= right) {
+                    int mid = left + (right - left) / 2;
+                    off_t cell_offset = get_cell_pointer(page->data, mid);
+                    uint32_t key_size = read_u32(page->data, cell_offset + 4);
+
+                    if (key_size == sizeof(uint64_t)) {
+                        uint64_t* cell_key = (uint64_t*)((uint8_t*)page->data + cell_offset + 8);
+                        if (*cell_key == key) {
+                            found = mid;
+                            break;
+                        } else if (*cell_key < key) {
+                            left = mid + 1;
+                        } else {
+                            right = mid - 1;
+                        }
+                    } else {
+                        /* Invalid key size, treat as not found */
                         break;
                     }
                 }
@@ -285,8 +313,7 @@ BTreeCursor* btree_find(BTree* tree, uint64_t key) {
             if (found >= 0) {
                 cursor->cell = found;
             } else {
-                /* Key not found - position at where it would be */
-                cursor->cell = cell_count;  /* End marker */
+                cursor->cell = cell_count;
                 cursor->is_end = 1;
             }
 
@@ -303,8 +330,8 @@ BTreeCursor* btree_find(BTree* tree, uint64_t key) {
                 uint16_t key_size = read_u16(page->data, cell_offset + 4);
 
                 if (key_size == sizeof(uint64_t)) {
-                    uint64_t* cell_key = (uint64_t*)((uint8_t*)page->data + cell_offset + 8);
-                    if (*cell_key >= key) {
+                    uint64_t* cell_key = (uint64_t*)((uint8_t*)page->data + cell_offset + 6);
+                    if (key < *cell_key) {
                         target_cell = i;
                         break;
                     }
@@ -314,7 +341,8 @@ BTreeCursor* btree_find(BTree* tree, uint64_t key) {
 
             uint32_t child_page;
             if (target_cell < cell_count) {
-                child_page = read_u32(page->data, BTREE_LEAF_HEADER_SIZE + target_cell * BTREE_CELL_POINTER_SIZE + 2);
+                off_t cell_data_offset = get_cell_pointer(page->data, target_cell);
+                child_page = read_u32(page->data, cell_data_offset);
             } else {
                 child_page = right_child;
             }
@@ -379,7 +407,7 @@ BTreeCursor* btree_first(BTree* tree) {
             uint32_t child_page;
             if (cell_count > 0) {
                 off_t cell_offset = get_cell_pointer(page->data, 0);
-                child_page = read_u32(page->data, cell_offset + 2);  /* child_page at offset 2 */
+                child_page = read_u32(page->data, cell_offset);  /* child_page at offset 0 of internal cell */
             } else {
                 child_page = right_child;
             }
@@ -474,10 +502,20 @@ void btree_cursor_next(BTreeCursor* cursor) {
     cursor->cell++;
 
     if (cursor->cell >= cell_count) {
-        /* Move to next page - for now, just mark end */
+        /* Try to move to next page via right_sibling */
+        uint32_t sibling = get_right_sibling(page->data);
+        page_unpin(page);
+
+        if (sibling != 0) {
+            cursor->page = sibling;
+            cursor->cell = 0;
+            cursor->is_end = 0;
+            return;
+        }
+
+        /* No sibling - mark end of iteration */
         cursor->is_end = 1;
         cursor->cell = cell_count;
-        page_unpin(page);
         return;
     }
 
@@ -537,7 +575,7 @@ int btree_get(BTreeCursor* cursor, uint64_t* key, void* buf, uint32_t* len) {
     memcpy(key, (uint8_t*)page->data + cell_offset + 8, sizeof(uint64_t));
 
     /* Copy value (remaining payload after key) */
-    uint32_t value_len = payload_size - key_size - 8;
+    uint32_t value_len = payload_size - key_size;
     if (value_len > 0) {
         memcpy(buf, (uint8_t*)page->data + cell_offset + 8 + key_size, value_len);
     }
@@ -551,23 +589,193 @@ int btree_cursor_peek(BTreeCursor* cursor, uint64_t* key, void* buf, uint32_t* l
     return btree_get(cursor, key, buf, len);
 }
 
-/*============================================================================
- * Insertion (simplified - no node splitting)
- *============================================================================*/
+/* Find the position where a key should be inserted in a leaf page */
+static int find_insert_position(Page* page, uint64_t key) {
+    BTreeNodeHeader header = get_node_header(page->data);
+    int cell_count = header.cell_count;
+
+    if (cell_count == 0) return 0;
+
+    int left = 0;
+    int right = cell_count;
+
+    while (left < right) {
+        int mid = left + (right - left) / 2;
+        off_t cell_offset = get_cell_pointer(page->data, mid);
+        uint32_t key_size = read_u32(page->data, cell_offset + 4);
+
+        if (key_size == sizeof(uint64_t)) {
+            uint64_t* cell_key = (uint64_t*)((uint8_t*)page->data + cell_offset + 8);
+            if (*cell_key < key) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        } else {
+            left = mid + 1;
+        }
+    }
+    return left;
+}
+
+/* Write a cell at a given offset */
+static void write_leaf_cell(void* page_data, off_t offset,
+                            uint32_t payload_size, uint32_t key_size,
+                            uint64_t key, const void* value) {
+    write_u32(page_data, offset, payload_size);
+    write_u32(page_data, offset + 4, key_size);
+    memcpy((uint8_t*)page_data + offset + 8, &key, sizeof(uint64_t));
+    if (value && payload_size > key_size) {
+        memcpy((uint8_t*)page_data + offset + 8 + key_size, value, payload_size - key_size);
+    }
+}
+
+/* Compact remaining cells in a page after removing one */
+__attribute__((unused))
+static int compact_page_cells(Page* page, int remaining_cells, int removed_idx) {
+    BTreeNodeHeader header = get_node_header(page->data);
+    uint16_t new_content_start = BTREE_LEAF_HEADER_SIZE + remaining_cells * BTREE_CELL_POINTER_SIZE;
+    uint16_t new_data_start = PAGE_SIZE;
+
+    for (int i = remaining_cells - 1; i >= 0; i--) {
+        int src_idx = (i >= removed_idx) ? i + 1 : i;
+        uint16_t src_ptr = get_cell_pointer(page->data, src_idx);
+
+        if (src_ptr < BTREE_LEAF_HEADER_SIZE || src_ptr >= PAGE_SIZE) {
+            return -1;
+        }
+
+        uint32_t payload_size = read_u32(page->data, src_ptr);
+        uint32_t cell_size = payload_size + 8;
+
+        if (cell_size > (uint32_t)new_data_start ||
+            (uint32_t)(new_data_start - cell_size) < (uint32_t)new_content_start) {
+            return -1;
+        }
+
+        new_data_start -= cell_size;
+        memcpy((uint8_t*)page->data + new_data_start,
+               (uint8_t*)page->data + src_ptr, cell_size);
+        set_cell_pointer(page->data, i, new_data_start);
+    }
+
+    header.content_start = new_content_start;
+    header.cell_count = remaining_cells;
+    set_node_header(page->data, &header);
+    return 0;
+}
+
+/* Split a leaf page that doesn't have enough space */
+static int split_leaf_page(BTree* tree, Page* page, int cell_count,
+                           uint32_t cell_size, int insert_idx,
+                           BTreeCursor* cursor) {
+    (void)cell_size;
+    (void)insert_idx;
+    uint32_t new_page_num;
+    if (pager_allocate_page(tree->pager, &new_page_num) < 0) {
+        return -1;
+    }
+
+    Page* new_page = page_pin(tree->cache, new_page_num);
+    if (!new_page) {
+        return -1;
+    }
+
+    memset(new_page->data, 0, PAGE_SIZE);
+    write_u8(new_page->data, 0, BTREE_PAGE_TYPE_LEAF);
+    write_u16(new_page->data, 1, 0);
+    write_u16(new_page->data, 3, PAGE_SIZE);
+    write_u8(new_page->data, 5, 0);
+    page_mark_dirty(new_page);
+
+    int original_count = cell_count;
+    int cells_to_move = (original_count + 1) / 2;
+    if (cells_to_move == 0) cells_to_move = 1;
+    uint16_t new_content_start = PAGE_SIZE;
+
+    for (int i = 0; i < cells_to_move; i++) {
+        int src_idx = original_count - cells_to_move + i;
+        if (src_idx >= 0 && src_idx < original_count) {
+            uint16_t src_ptr = get_cell_pointer(page->data, src_idx);
+            uint32_t payload_size = read_u32(page->data, src_ptr);
+            uint32_t needed = payload_size + 8;
+            if (needed > (uint32_t)new_content_start ||
+                new_content_start < BTREE_LEAF_HEADER_SIZE + (uint16_t)needed) {
+                page_unpin(new_page);
+                return -1;
+            }
+            uint16_t new_ptr = (uint16_t)(new_content_start - payload_size - 8);
+            new_content_start = new_ptr;
+            memcpy((uint8_t*)new_page->data + new_ptr,
+                   (uint8_t*)page->data + src_ptr, payload_size + 8);
+            set_cell_pointer(new_page->data, i, new_ptr);
+        }
+    }
+
+    BTreeNodeHeader new_header;
+    new_header.page_type = BTREE_PAGE_TYPE_LEAF;
+    new_header.cell_count = cells_to_move;
+    new_header.content_start = new_content_start;
+    new_header.fragmented_bytes = 0;
+    set_node_header(new_page->data, &new_header);
+    set_right_sibling(new_page->data, get_right_sibling(page->data));
+    page_mark_dirty(new_page);
+
+    int remaining_cells = original_count - cells_to_move;
+    if (remaining_cells > 0) {
+        uint16_t new_content_start = BTREE_LEAF_HEADER_SIZE + remaining_cells * BTREE_CELL_POINTER_SIZE;
+        uint16_t new_data_start = PAGE_SIZE;
+
+        for (int i = remaining_cells - 1; i >= 0; i--) {
+            int src_idx = i;
+            uint16_t src_ptr = get_cell_pointer(page->data, src_idx);
+
+            if (src_ptr < BTREE_LEAF_HEADER_SIZE || src_ptr >= PAGE_SIZE) {
+                page_unpin(new_page);
+                return -1;
+            }
+
+            uint32_t payload_size = read_u32(page->data, src_ptr);
+            uint32_t cell_size = payload_size + 8;
+
+            if (cell_size > (uint32_t)new_data_start ||
+                (uint32_t)(new_data_start - cell_size) < (uint32_t)new_content_start) {
+                page_unpin(new_page);
+                return -1;
+            }
+
+            new_data_start -= cell_size;
+            memcpy((uint8_t*)page->data + new_data_start,
+                   (uint8_t*)page->data + src_ptr, cell_size);
+            set_cell_pointer(page->data, i, new_data_start);
+        }
+    }
+
+    BTreeNodeHeader header;
+    header.page_type = BTREE_PAGE_TYPE_LEAF;
+    header.cell_count = remaining_cells;
+    header.content_start = (remaining_cells > 0) ?
+        (BTREE_LEAF_HEADER_SIZE + remaining_cells * BTREE_CELL_POINTER_SIZE) : PAGE_SIZE;
+    header.fragmented_bytes = 0;
+    set_node_header(page->data, &header);
+    set_right_sibling(page->data, new_page_num);
+    page_mark_dirty(page);
+    page_unpin(new_page);
+
+    page = page_pin(tree->cache, cursor->page);
+    if (!page) {
+        return -1;
+    }
+    return 0;
+}
 
 int btree_insert(BTree* tree, uint64_t key, const void* value, uint32_t len) {
     if (!tree || !tree->is_open) return -1;
 
     /* Find leaf page for key */
     BTreeCursor* cursor = btree_find(tree, key);
-    if (!cursor) return -1;
-
-    if (!cursor->is_end) {
-        /* Key exists - for now, just update */
-        page_unpin(page_pin(tree->cache, cursor->page));
-        /* TODO: implement proper update/insert */
-        btree_cursor_free(cursor);
-        return 0;
+    if (!cursor) {
+        return -1;
     }
 
     /* Get leaf page */
@@ -581,34 +789,46 @@ int btree_insert(BTree* tree, uint64_t key, const void* value, uint32_t len) {
     int cell_count = header.cell_count;
 
     /* Calculate space needed */
-    uint32_t total_payload = sizeof(uint64_t) + len + 8;  /* key + value + header */
-    uint16_t cell_size = 2 + total_payload;  /* cell pointer + payload */
-
-    /* Check if we have space */
-    off_t content_start = header.content_start;
-    off_t available_space = content_start - (BTREE_LEAF_HEADER_SIZE + cell_count * BTREE_CELL_POINTER_SIZE);
-
-    if (cell_size > available_space) {
-        /* Need to split - TODO: implement proper splitting */
+    uint32_t total_payload = sizeof(uint64_t) + len;  /* key + value */
+    /* Check for overflow in cell_size calculation */
+    if (total_payload > UINT32_MAX - 8) {
         page_unpin(page);
         btree_cursor_free(cursor);
         return -1;
     }
+    uint32_t cell_size = 8 + total_payload;
+
+    /* Check if we have space, if not, split the page */
+    off_t content_start = header.content_start;
+    off_t available_space = content_start - (BTREE_LEAF_HEADER_SIZE + cell_count * BTREE_CELL_POINTER_SIZE);
+
+    if ((uint32_t)cell_size > (uint32_t)available_space) {
+        if (split_leaf_page(tree, page, cell_count, cell_size, cursor->cell, cursor) < 0) {
+            page_unpin(page);
+            btree_cursor_free(cursor);
+            return -1;
+        }
+        page_unpin(page);
+        page = page_pin(tree->cache, cursor->page);
+        if (!page) {
+            btree_cursor_free(cursor);
+            return -1;
+        }
+        header = get_node_header(page->data);
+        content_start = header.content_start;
+        cell_count = header.cell_count;
+    }
 
     /* Make room for new cell */
-    int insert_idx = cursor->cell;
-    for (int i = cell_count; i > insert_idx; i--) {
-        set_cell_pointer(page->data, i, get_cell_pointer(page->data, i - 1));
+    int insert_idx = find_insert_position(page, key);
+    for (int i = cell_count - 1; i >= insert_idx; i--) {
+        set_cell_pointer(page->data, i + 1, get_cell_pointer(page->data, i));
     }
 
     /* Write cell */
-    uint16_t cell_offset = content_start - (uint16_t)total_payload;
+    uint16_t cell_offset = (uint16_t)(content_start - cell_size);
     set_cell_pointer(page->data, insert_idx, cell_offset);
-
-    write_u32(page->data, cell_offset, total_payload);
-    write_u32(page->data, cell_offset + 4, sizeof(uint64_t));
-    memcpy((uint8_t*)page->data + cell_offset + 8, &key, sizeof(uint64_t));
-    memcpy((uint8_t*)page->data + cell_offset + 8 + sizeof(uint64_t), value, len);
+    write_leaf_cell(page->data, cell_offset, total_payload, sizeof(uint64_t), key, value);
 
     /* Update header */
     header.cell_count++;
@@ -622,11 +842,108 @@ int btree_insert(BTree* tree, uint64_t key, const void* value, uint32_t len) {
     return 0;
 }
 
+/* Delete a key from the B+tree */
 int btree_delete(BTree* tree, uint64_t key) {
-    (void)tree;
-    (void)key;
-    /* TODO: implement delete */
-    return -1;
+    if (!tree || !tree->is_open) return -1;
+
+    /* Find the leaf page containing the key */
+    BTreeCursor* cursor = btree_find(tree, key);
+    if (!cursor) {
+        return -1;
+    }
+
+    /* Key not found */
+    if (cursor->is_end) {
+        btree_cursor_free(cursor);
+        return -1;
+    }
+
+    Page* page = page_pin(tree->cache, cursor->page);
+    if (!page) {
+        btree_cursor_free(cursor);
+        return -1;
+    }
+
+    BTreeNodeHeader header = get_node_header(page->data);
+    int cell_count = header.cell_count;
+    int delete_idx = cursor->cell;
+
+    if (delete_idx < 0 || delete_idx >= cell_count) {
+        page_unpin(page);
+        btree_cursor_free(cursor);
+        return -1;
+    }
+
+    /* Remove cell by shifting pointers */
+    for (int i = delete_idx; i < cell_count - 1; i--) {
+        set_cell_pointer(page->data, i, get_cell_pointer(page->data, i + 1));
+    }
+
+    header.cell_count--;
+    set_node_header(page->data, &header);
+    page_mark_dirty(page);
+
+    /* Check if page is now underfull */
+    int min_keys = BTREE_MIN_KEYS;
+    if (header.cell_count < min_keys && header.cell_count > 0) {
+        /* Page is underfull - need to borrow or merge */
+        uint32_t right_sibling = get_right_sibling(page->data);
+        /* Try right sibling first */
+        if (right_sibling != 0) {
+            Page* right_page = page_pin(tree->cache, right_sibling);
+            if (right_page) {
+                BTreeNodeHeader right_header = get_node_header(right_page->data);
+                if (right_header.cell_count > min_keys) {
+                    /* Borrow one cell from right sibling */
+                    int right_count = right_header.cell_count;
+                    off_t right_cell_offset = get_cell_pointer(right_page->data, 0);
+                    uint32_t payload_size = read_u32(right_page->data, right_cell_offset);
+                    uint32_t cell_size = payload_size + 8;
+
+                    /* Check if we have space */
+                    off_t content_start = header.content_start;
+                    off_t available_space = content_start - (BTREE_LEAF_HEADER_SIZE + header.cell_count * BTREE_CELL_POINTER_SIZE);
+
+                    if (cell_size <= (uint32_t)available_space) {
+                        /* Shift existing cells to make room */
+                        for (int i = header.cell_count - 1; i >= 0; i--) {
+                            set_cell_pointer(page->data, i + 1, get_cell_pointer(page->data, i));
+                        }
+
+                        /* Copy first cell from right sibling */
+                        uint16_t new_offset = (uint16_t)(content_start - cell_size);
+                        memcpy((uint8_t*)page->data + new_offset,
+                               (uint8_t*)right_page->data + right_cell_offset, cell_size);
+                        set_cell_pointer(page->data, 0, new_offset);
+
+                        /* Update both headers */
+                        header.cell_count++;
+                        header.content_start = new_offset;
+                        set_node_header(page->data, &header);
+                        page_mark_dirty(page);
+
+                        /* Remove first cell from right sibling */
+                        for (int i = 0; i < right_count - 1; i++) {
+                            set_cell_pointer(right_page->data, i, get_cell_pointer(right_page->data, i + 1));
+                        }
+                        right_header.cell_count--;
+                        set_node_header(right_page->data, &right_header);
+                        page_mark_dirty(right_page);
+                    }
+                }
+                page_unpin(right_page);
+            }
+        }
+    }
+
+    /* Handle empty root case */
+    if (header.cell_count == 0) {
+        /* Root is empty - could promote first child as new root, but for now just leave it */
+    }
+
+    page_unpin(page);
+    btree_cursor_free(cursor);
+    return 0;
 }
 
 int btree_update(BTree* tree, uint64_t key, const void* value, uint32_t len) {
