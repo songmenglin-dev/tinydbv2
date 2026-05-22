@@ -142,21 +142,14 @@ Use specialized subagents for professional tasks instead of general-purpose.
 
 ### Expert Subagent Mapping
 
-| Task Type        | Subagent                              | Trigger Keywords                                        |
-| ---------------- | ------------------------------------- | ------------------------------------------------------- |
-| C/系统开发       | `c-pro`                               | C语言, 系统编程, 嵌入式, 性能, 内存管理               |
-| 前端/UI开发      | `engineering-frontend-developer`       | 前端, React, Vue, UI, 组件, CSS, 样式                 |
-| 后端/架构        | `engineering-backend-architect`       | 后端, API, 架构, 服务, 微服务                          |
-| 数据工程         | `engineering-data-engineer`           | 数据, ETL, pipeline, 数据流                            |
-| 安全分析         | `engineering-security-engineer`       | 安全, 漏洞, 认证, 授权, 加密                            |
-| 移动端           | `engineering-mobile-app-builder`     | 移动端, iOS, Android, App                              |
-| DevOps/部署      | `engineering-devops-automator`        | 部署, CI/CD, Docker, K8s, 运维                         |
-| 性能优化         | `engineering-autonomous-optimization-architect` | 性能, 优化, 缓存, 延迟                        |
-| 代码审查         | `engineering-code-reviewer`           | 审查, review, 检查代码                                 |
-| 数据库           | `engineering-database-optimizer`       | 数据库, SQL, 索引, 查询优化                            |
-| 架构设计         | `engineering-software-architect`       | 架构, 设计模式, 系统设计                               |
-| SRE/可观测性     | `engineering-sre`                      | 监控, SRE, 可观测性, SLO                               |
-| 威胁检测         | `engineering-threat-detection-engineer` | 威胁检测, SIEM, 威胁狩猎                               |
+| Task Type        | Subagent                        | Trigger Keywords                              |
+| ---------------- | ------------------------------- | --------------------------------------------- |
+| C/系统开发       | `c-pro`                         | C语言, 系统编程, 存储层, 解析器, 执行器     |
+| 数据库           | `engineering-database-optimizer` | SQL, 索引, 查询优化, B+tree                 |
+| 安全分析         | `engineering-security-engineer` | 安全, 漏洞, 注入, 认证                       |
+| 代码审查         | `engineering-code-reviewer`     | 审查, review, 检查代码                       |
+| 架构设计         | `engineering-software-architect` | 架构, 设计模式, 系统设计                   |
+| 性能优化         | `engineering-autonomous-optimization-architect` | 性能, 优化, 缓存               |
 
 ### Usage Rules
 
