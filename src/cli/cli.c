@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <errno.h>
-#include <time.h>
+#include <sys/time.h>
 
 int cli_init(CLI** cli_out) {
     CLI* cli = calloc(1, sizeof(CLI));
@@ -92,6 +92,10 @@ int cli_execute_sql(CLI* cli, const char* sql) {
         }
     }
 
+    /* Record start time */
+    struct timeval start;
+    gettimeofday(&start, NULL);
+
     char buf[CLI_MAX_LINE + 64];
     snprintf(buf, sizeof(buf), "QUERY:%s\n", sql);
 
@@ -104,8 +108,16 @@ int cli_execute_sql(CLI* cli, const char* sql) {
     size_t resp_len = 0;
     ssize_t n;
 
+    /* Record end time when first byte received */
+    struct timeval end;
+    bool first_read_done = false;
+
     // Read until we get the full response (ends with newline or END marker)
     while ((n = read(cli->socket_fd, resp + resp_len, sizeof(resp) - resp_len - 1)) > 0) {
+        if (!first_read_done) {
+            gettimeofday(&end, NULL);
+            first_read_done = true;
+        }
         resp_len += n;
         resp[resp_len] = '\0';
         // Check for END marker to know when data is complete
@@ -115,6 +127,10 @@ int cli_execute_sql(CLI* cli, const char* sql) {
         // Also break on regular OK response without row data
         if (resp_len > 0 && resp[resp_len - 1] == '\n' &&
             strstr(resp, "row(s)") != NULL && strstr(resp, "ROW:") == NULL) {
+            break;
+        }
+        // Break on ERROR response
+        if (resp_len >= 5 && strncmp(resp, "ERROR", 5) == 0) {
             break;
         }
     }
@@ -142,58 +158,23 @@ int cli_execute_sql(CLI* cli, const char* sql) {
     }
 
     if (strncmp(resp, "OK", 2) == 0 || strncmp(resp, "Query OK", 8) == 0) {
+        /* Calculate elapsed time in seconds */
+        double elapsed_sec = 0;
+        if (first_read_done) {
+            long sec = end.tv_sec - start.tv_sec;
+            long usec = end.tv_usec - start.tv_usec;
+            elapsed_sec = sec + usec / 1000000.0;
+        }
+
         // Check if this is a SELECT (has "returned") or DML (has "affected")
         char* returned_part = strstr(resp, "returned");
         char* affected_part = strstr(resp, "affected");
 
         if (returned_part != NULL) {
-            // SELECT query - parse row count from "OK N row(s) returned"
-            int rows = 0;
-            sscanf(resp + 3, "%d", &rows);
-            printf("Query OK, %d row(s) returned\n", rows);
-
-            /* Extract and display row data from ROW: lines */
-            /* Protocol: OK N row(s) returned\n, ROW: lines, \nEND\n */
-            /* Find the OK line and END marker */
-            char* ok_line = strstr(resp, "OK ");
-            char* end_marker = strstr(resp, "\nEND\n");
-
-            if (ok_line && end_marker) {
-                /* Terminate at end marker */
-                *end_marker = '\0';
-
-                /* Find the newline after OK line to get to row data */
-                char* line_start = strchr(ok_line, '\n');
-                if (line_start) {
-                    line_start++;  /* Skip the newline */
-                } else {
-                    /* No newline after OK line - find end of OK line */
-                    line_start = ok_line;
-                    while (*line_start && *line_start != '\n') line_start++;
-                    if (*line_start == '\n') line_start++;
-                }
-
-                /* Process each ROW: line */
-                char* line = line_start;
-                while (line && *line) {
-                    char* next_line = strchr(line, '\n');
-                    if (next_line) *next_line = '\0';
-
-                    /* Parse ROW:col1\tcol2\tcol3 format */
-                    if (strncmp(line, "ROW:", 4) == 0) {
-                        char* cols = line + 4;
-                        /* Replace tabs with spaces for display */
-                        char* p = cols;
-                        while (*p) {
-                            if (*p == '\t') *p = ' ';
-                            p++;
-                        }
-                        printf("%s\n", cols);
-                    }
-                    line = next_line ? next_line + 1 : NULL;
-                }
-            }
-            return rows;
+            /* Use box formatting for SELECT results */
+            int rows = cli_format_table(resp, resp_len, elapsed_sec);
+            (void)rows;  /* rows counted in cli_format_table */
+            return 0;
         } else if (affected_part != NULL) {
             // DML query (INSERT/UPDATE/DELETE)
             int affected = 0;
@@ -452,6 +433,223 @@ void cli_display_error(const char* error) {
 
 void cli_display_ok(int changes) {
     printf("OK: %d row(s) affected\n", changes);
+}
+
+/*============================================================================
+ * Table formatting (MySQL-style box drawing)
+ *============================================================================*/
+static void print_border(int* widths, int col_count) {
+    printf("+");
+    for (int i = 0; i < col_count; i++) {
+        for (int j = 0; j < widths[i] + 2; j++) {
+            printf("-");
+        }
+        printf("+");
+    }
+    printf("\n");
+}
+
+int cli_print_box_row(char** cols, int col_count, int* widths) {
+    if (cols == NULL || widths == NULL) return -1;
+
+    printf("|");
+    for (int i = 0; i < col_count; i++) {
+        const char* col = cols[i] ? cols[i] : "";
+        printf(" %-*s |", widths[i], col);
+    }
+    printf("\n");
+    return 0;
+}
+
+void cli_format_footer(int row_count, double elapsed_sec) {
+    printf("%d row(s) in set", row_count);
+    if (elapsed_sec > 0) {
+        printf(" (%.2f sec)", elapsed_sec);
+    }
+    printf("\n");
+}
+
+int cli_format_table(char* resp, size_t resp_len, double elapsed_sec) {
+    if (resp == NULL || resp_len == 0) return -1;
+
+    /* Find the OK line and END marker */
+    char* ok_line = strstr(resp, "OK ");
+    char* end_marker = strstr(resp, "\nEND\n");
+
+    if (ok_line == NULL || end_marker == NULL) {
+        /* Fallback to raw output */
+        printf("%s\n", resp);
+        return 0;
+    }
+
+    /* Parse row count from OK line */
+    int row_count = 0;
+    sscanf(resp + 3, "%d", &row_count);
+
+    /* Extract row data from ROW: lines */
+    /* First pass: count rows and find column headers from first ROW: line */
+    char* line_start = NULL;
+    char* end_of_ok_line = strchr(ok_line, '\n');
+    if (end_of_ok_line) {
+        line_start = end_of_ok_line + 1;
+    } else {
+        line_start = ok_line;
+    }
+
+    /* Count rows and find first row to determine column count */
+    int max_cols = 16;
+    int col_count = 0;
+    int actual_rows = 0;
+    char* first_row_data = NULL;
+    int first_pass_rows = 0;
+
+    /* First pass: count rows, but DON'T modify buffer (save newlines for second pass) */
+    char* line = line_start;
+    while (line && line < end_marker) {
+        char* next_line = strchr(line, '\n');
+        /* Note: don't modify the buffer here - second pass needs the newlines */
+
+        if (strncmp(line, "ROW:", 4) == 0) {
+            first_pass_rows++;
+            if (first_row_data == NULL) {
+                first_row_data = line + 4;
+            }
+        }
+        line = next_line ? next_line + 1 : NULL;
+    }
+
+    /* Set actual_rows from first pass */
+    actual_rows = first_pass_rows;
+
+    if (first_row_data == NULL || actual_rows == 0) {
+        printf("Query OK, %d row(s) returned\n", row_count);
+        cli_format_footer(row_count, elapsed_sec);
+        return row_count;
+    }
+
+    /* Parse first row to count columns */
+    char* p = first_row_data;
+    while (*p) {
+        if (*p == '\t') col_count++;
+        p++;
+    }
+    col_count++;  /* Last column after last tab */
+
+    if (col_count > max_cols) col_count = max_cols;
+
+    /* Allocate arrays */
+    int* widths = calloc(col_count, sizeof(int));
+    char*** rows = calloc(actual_rows, sizeof(char*));
+    for (int i = 0; i < actual_rows; i++) {
+        rows[i] = calloc(col_count, sizeof(char*));
+    }
+
+    /* Second pass: extract all row data */
+    int row_idx = 0;
+    line = line_start;
+    while (line && line < end_marker && row_idx < actual_rows) {
+        char* next_line = strchr(line, '\n');
+        if (next_line) *next_line = '\0';
+
+        if (strncmp(line, "ROW:", 4) == 0) {
+            char* cols = line + 4;
+            int col_idx = 0;
+            char* start = cols;
+            p = cols;
+
+            while (*p && col_idx < col_count) {
+                if (*p == '\t') {
+                    *p = '\0';
+                    rows[row_idx][col_idx] = strdup(start);
+                    start = p + 1;
+                    col_idx++;
+                }
+                p++;
+            }
+            /* Last column */
+            if (col_idx < col_count && *start) {
+                rows[row_idx][col_idx] = strdup(start);
+            }
+            row_idx++;
+        }
+        line = next_line ? next_line + 1 : NULL;
+    }
+
+    /* Detect query type by column count */
+    int is_desc_query = (col_count == 6);
+    int is_show_tables = (col_count == 1);
+
+    /* Find header row - use first ROW: line, but DESC/SHOW have hardcoded headers */
+    char header[16][256];
+    if (is_desc_query) {
+        /* DESC: use proper column names */
+        const char* desc_headers[] = {"Field", "Type", "Null", "Key", "Default", "Extra"};
+        for (int i = 0; i < col_count; i++) {
+            strncpy(header[i], desc_headers[i], sizeof(header[i]) - 1);
+            header[i][sizeof(header[i]) - 1] = '\0';
+            widths[i] = strlen(desc_headers[i]);
+        }
+    } else if (is_show_tables) {
+        /* SHOW TABLES: use generic header */
+        const char* show_header = "Tables_in_database";
+        strncpy(header[0], show_header, sizeof(header[0]) - 1);
+        header[0][sizeof(header[0]) - 1] = '\0';
+        widths[0] = strlen(show_header);
+    } else {
+        /* Regular SELECT: first row data is header */
+        for (int i = 0; i < col_count; i++) {
+            if (rows[0][i] != NULL) {
+                size_t len = strlen(rows[0][i]);
+                strncpy(header[i], rows[0][i], sizeof(header[i]) - 1);
+                header[i][sizeof(header[i]) - 1] = '\0';
+                if ((int)len > widths[i]) {
+                    widths[i] = (int)len;
+                }
+            } else {
+                header[i][0] = '\0';
+            }
+        }
+    }
+
+    /* Print table */
+    /* Top border */
+    print_border(widths, col_count);
+
+    /* Header row */
+    printf("|");
+    for (int i = 0; i < col_count; i++) {
+        printf(" %-*s |", widths[i], header[i]);
+    }
+    printf("\n");
+
+    /* Header separator */
+    print_border(widths, col_count);
+
+    /* Data rows - DESC shows all rows, SELECT/SHOW start from appropriate row */
+    int start_row = is_desc_query ? 0 : 1;
+    /* For SHOW TABLES, data starts at row 0 since there's no separate header row in data */
+    if (is_show_tables) start_row = 0;
+    for (int r = start_row; r < actual_rows; r++) {
+        cli_print_box_row(rows[r], col_count, widths);
+    }
+
+    /* Bottom border */
+    print_border(widths, col_count);
+
+    /* Footer */
+    cli_format_footer(actual_rows, elapsed_sec);
+
+    /* Free memory */
+    for (int i = 0; i < actual_rows; i++) {
+        for (int j = 0; j < col_count; j++) {
+            if (rows[i][j]) free(rows[i][j]);
+        }
+        free(rows[i]);
+    }
+    free(rows);
+    free(widths);
+
+    return actual_rows;
 }
 
 int cli_handle_meta_command(CLI* cli, const char* cmd) {

@@ -95,6 +95,13 @@ void cli_display_error(const char* error);
 void cli_display_ok(int changes);
 
 /*============================================================================
+ * Table formatting (MySQL-style box drawing)
+ *============================================================================*/
+int cli_format_table(char* resp, size_t resp_len, double elapsed_sec);
+int cli_print_box_row(char** cols, int col_count, int* widths);
+void cli_format_footer(int row_count, double elapsed_sec);
+
+/*============================================================================
  * Argument parsing
  *============================================================================*/
 int cli_parse_args(CLI* cli, int argc, char** argv);
