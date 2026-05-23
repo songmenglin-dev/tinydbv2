@@ -18,7 +18,9 @@ typedef enum {
     AST_UPDATE,
     AST_DELETE,
     AST_SELECT,
-    AST_TRANSACTION
+    AST_TRANSACTION,
+    AST_SHOW_TABLES,
+    AST_DESCRIBE_TABLE
 } AstNodeType;
 
 /*============================================================================
@@ -224,6 +226,21 @@ typedef struct {
     AstNode base;
     TransactionType transaction_type;
 } AstTransaction;
+
+/*============================================================================
+ * SHOW TABLES statement
+ *============================================================================*/
+typedef struct {
+    AstNode base;
+} AstShowTables;
+
+/*============================================================================
+ * DESCRIBE TABLE statement
+ *============================================================================*/
+typedef struct {
+    AstNode base;
+    char* table_name;
+} AstDescribeTable;
 
 /*============================================================================
  * AST node allocation

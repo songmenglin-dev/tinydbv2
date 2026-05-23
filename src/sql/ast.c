@@ -143,6 +143,14 @@ void ast_free(AstNode* node) {
         case AST_TRANSACTION:
             /* No additional allocation */
             break;
+        case AST_SHOW_TABLES:
+            /* No additional allocation */
+            break;
+        case AST_DESCRIBE_TABLE: {
+            AstDescribeTable* stmt = AST_CAST(AstDescribeTable, node);
+            free(stmt->table_name);
+            break;
+        }
     }
 
     free(node);

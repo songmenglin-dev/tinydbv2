@@ -304,7 +304,7 @@ int server_handle_client(Server* server, int client_fd) {
                     SERVER_DEBUG_PRINT("[SERVER] parser_destroy returned\n");
 
                     /* Determine row count (executor already scanned for SELECT) */
-                    if (saved_type == AST_SELECT && exec_result == SUCCESS) {
+                    if ((saved_type == AST_SELECT || saved_type == AST_SHOW_TABLES || saved_type == AST_DESCRIBE_TABLE) && exec_result == SUCCESS) {
                         row_count = (int)sel_result.row_count;
                     } else if (saved_type == AST_INSERT && exec_result == SUCCESS) {
                         row_count = 1;
@@ -325,7 +325,7 @@ int server_handle_client(Server* server, int client_fd) {
                 SERVER_DEBUG_PRINT("[SERVER] Calling write for ERROR\n");
                 write(client_fd, resp_buf, strlen(resp_buf));
                 SERVER_DEBUG_PRINT("[SERVER] write ERROR done\n");
-            } else if (saved_type == AST_SELECT) {
+            } else if (saved_type == AST_SELECT || saved_type == AST_SHOW_TABLES || saved_type == AST_DESCRIBE_TABLE) {
                 /* Send OK with row count first */
                 snprintf(resp_buf, sizeof(resp_buf), "OK %d row(s) returned\n", row_count);
                 SERVER_DEBUG_PRINT("[SERVER] Calling write for SELECT OK\n");
