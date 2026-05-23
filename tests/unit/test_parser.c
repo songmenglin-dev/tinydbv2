@@ -95,6 +95,51 @@ test(parser_insert) {
     AstInsert* ins = (AstInsert*)((char*)node - offsetof(AstInsert, base));
     assert_str_eq(ins->table_name, "users");
 
+    /* Verify it has one ValueList (one row) with two expressions */
+    assert_non_null(ins->values);
+    assert_eq(ins->values->count, 2);
+    assert_non_null(ins->values->values);
+    assert_non_null(ins->values->values[0]);
+    assert_eq(ins->values->values[0]->type, EXPR_LITERAL_INT);
+    assert_eq(ins->values->values[0]->as_int, 1);
+    assert_non_null(ins->values->values[1]);
+    assert_eq(ins->values->values[1]->type, EXPR_LITERAL_STRING);
+    assert_str_eq(ins->values->values[1]->as_string.str, "Alice");
+    /* Should have only one row (no next) */
+    assert_null(ins->values->next);
+
+    parser_free_ast(p, node);
+    parser_destroy(p);
+}
+
+test(parser_insert_multi_row) {
+    /* Test INSERT with multiple value tuples: INSERT INTO t VALUES (1),(2) */
+    const char* sql = "INSERT INTO t VALUES (1),(2);";
+    Parser* p = parser_create(sql, strlen(sql));
+    assert_non_null(p);
+
+    AstNode* node = parser_parse(p);
+    assert_non_null(node);
+    assert_eq(node->type, AST_INSERT);
+
+    AstInsert* ins = (AstInsert*)((char*)node - offsetof(AstInsert, base));
+    assert_str_eq(ins->table_name, "t");
+
+    /* Should have TWO ValueList nodes (two rows) */
+    assert_non_null(ins->values);
+    assert_eq(ins->values->count, 1);
+    assert_non_null(ins->values->values[0]);
+    assert_eq(ins->values->values[0]->type, EXPR_LITERAL_INT);
+    assert_eq(ins->values->values[0]->as_int, 1);
+
+    /* Second row */
+    assert_non_null(ins->values->next);
+    assert_eq(ins->values->next->count, 1);
+    assert_non_null(ins->values->next->values[0]);
+    assert_eq(ins->values->next->values[0]->type, EXPR_LITERAL_INT);
+    assert_eq(ins->values->next->values[0]->as_int, 2);
+    assert_null(ins->values->next->next);
+
     parser_free_ast(p, node);
     parser_destroy(p);
 }
