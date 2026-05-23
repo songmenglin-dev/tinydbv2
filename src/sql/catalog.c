@@ -7,13 +7,97 @@
 #include <stdio.h>
 
 /*============================================================================
+ * Column Serialization Helpers
+ *============================================================================*/
+
+/* Serialized column info: name(64) + type(4) + not_null(4) + primary_key(4) + autoincrement(4) + default_val(128) = 208 bytes */
+#define COLUMN_INFO_SIZE 208
+
+static int serialize_column_info(const ColumnInfo* col, void* buf) {
+    if (!col || !buf) return ERR_INTERNAL;
+
+    uint8_t* data = (uint8_t*)buf;
+    uint32_t offset = 0;
+
+    /* name: 64 bytes */
+    memset(data + offset, 0, 64);
+    strncpy((char*)(data + offset), col->name, 63);
+    offset += 64;
+
+    /* type: 4 bytes */
+    *(int*)(data + offset) = col->type;
+    offset += 4;
+
+    /* not_null: 4 bytes */
+    *(int*)(data + offset) = col->not_null;
+    offset += 4;
+
+    /* primary_key: 4 bytes */
+    *(int*)(data + offset) = col->primary_key;
+    offset += 4;
+
+    /* autoincrement: 4 bytes */
+    *(int*)(data + offset) = col->autoincrement;
+    offset += 4;
+
+    /* default_val: 128 bytes */
+    memset(data + offset, 0, 128);
+    if (col->default_val[0] != '\0') {
+        strncpy((char*)(data + offset), col->default_val, 127);
+    }
+    offset += 128;
+
+    (void)offset;
+    return SUCCESS;
+}
+
+static int deserialize_column_info(const void* buf, ColumnInfo* col) {
+    if (!buf || !col) return ERR_INTERNAL;
+
+    const uint8_t* data = (const uint8_t*)buf;
+
+    /* name: 64 bytes */
+    memset(col->name, 0, 64);
+    strncpy(col->name, (const char*)data, 63);
+    data += 64;
+
+    /* type: 4 bytes */
+    col->type = *(int*)data;
+    data += 4;
+
+    /* not_null: 4 bytes */
+    col->not_null = *(int*)data;
+    data += 4;
+
+    /* primary_key: 4 bytes */
+    col->primary_key = *(int*)data;
+    data += 4;
+
+    /* autoincrement: 4 bytes */
+    col->autoincrement = *(int*)data;
+    data += 4;
+
+    /* default_val: 128 bytes */
+    memset(col->default_val, 0, 128);
+    strncpy(col->default_val, (const char*)data, 127);
+
+    return SUCCESS;
+}
+
+/*============================================================================
  * Catalog Entry Serialization
  *============================================================================*/
 
-/* Serialized format: type(4) + name(64) + tbl_name(64) + sql(512) + root_page(4) + is_valid(4) = 652 bytes */
-#define CATALOG_ENTRY_SIZE 652
+/*
+ * Catalog entry serialized format:
+ * type(4) + name(64) + tbl_name(64) + sql(512) + root_page(4) + is_valid(4) + column_count(4) + columns(var)
+ * Minimum size: 656 bytes (no columns)
+ * With columns: 656 + 4 + column_count * 208 bytes
+ */
+#define CATALOG_ENTRY_BASE_SIZE 656
+#define CATALOG_ENTRY_MAX_SIZE (CATALOG_ENTRY_BASE_SIZE + MAX_TABLE_COLUMNS * COLUMN_INFO_SIZE)
 
-static int serialize_entry(const CatalogEntry* entry, void* buf) {
+static int serialize_entry(const CatalogEntry* entry, void* buf, size_t buf_size, size_t* out_size) {
     if (!entry || !buf) return ERR_INTERNAL;
 
     uint8_t* data = (uint8_t*)buf;
@@ -48,12 +132,29 @@ static int serialize_entry(const CatalogEntry* entry, void* buf) {
     *(uint32_t*)(data + offset) = entry->is_valid ? 1 : 0;
     offset += 4;
 
-    (void)offset;
+    /* column_count: 4 bytes */
+    *(int*)(data + offset) = entry->column_count;
+    offset += 4;
+
+    /* column data: variable - column_count * COLUMN_INFO_SIZE bytes */
+    for (int i = 0; i < entry->column_count; i++) {
+        if (offset + COLUMN_INFO_SIZE > buf_size) {
+            return ERR_INTERNAL;
+        }
+        serialize_column_info(&entry->columns[i], data + offset);
+        offset += COLUMN_INFO_SIZE;
+    }
+
+    *out_size = offset;
     return SUCCESS;
 }
 
-static int deserialize_entry(const void* buf, CatalogEntry* entry) {
+static int deserialize_entry(const void* buf, size_t buf_size, CatalogEntry* entry) {
     if (!buf || !entry) return ERR_INTERNAL;
+
+    /* Initialize columns to NULL for proper cleanup on error */
+    entry->columns = NULL;
+    entry->column_count = 0;
 
     const uint8_t* data = (const uint8_t*)buf;
 
@@ -82,6 +183,41 @@ static int deserialize_entry(const void* buf, CatalogEntry* entry) {
 
     /* is_valid: 4 bytes */
     entry->is_valid = *(uint32_t*)data != 0;
+    data += 4;
+
+    /* column_count: 4 bytes */
+    entry->column_count = *(int*)data;
+    data += 4;
+
+    /* column data: variable - column_count * COLUMN_INFO_SIZE bytes */
+    if (entry->column_count > 0 && entry->column_count <= MAX_TABLE_COLUMNS) {
+        /* Verify we have enough data */
+        size_t consumed = data - (const uint8_t*)buf;
+        size_t needed = consumed + entry->column_count * COLUMN_INFO_SIZE;
+        if (needed > buf_size) {
+            entry->column_count = 0;
+            return ERR_INTERNAL;
+        }
+
+        entry->columns = malloc(entry->column_count * sizeof(ColumnInfo));
+        if (!entry->columns) {
+            entry->column_count = 0;
+            return ERR_INTERNAL;
+        }
+
+        for (int i = 0; i < entry->column_count; i++) {
+            if (deserialize_column_info(data, &entry->columns[i]) != SUCCESS) {
+                free(entry->columns);
+                entry->columns = NULL;
+                entry->column_count = 0;
+                return ERR_INTERNAL;
+            }
+            data += COLUMN_INFO_SIZE;
+        }
+    } else {
+        entry->columns = NULL;
+        entry->column_count = 0;
+    }
 
     return SUCCESS;
 }
@@ -136,10 +272,11 @@ int catalog_init(Catalog* catalog) {
     strcpy(entry.sql, "CREATE TABLE tinydb_master (type TEXT, name TEXT, tbl_name TEXT, sql TEXT)");
 
     /* Insert into catalog tree with special key (0) */
-    char buf[CATALOG_ENTRY_SIZE];
-    serialize_entry(&entry, buf);
+    char buf[CATALOG_ENTRY_MAX_SIZE];
+    size_t buf_size = 0;
+    serialize_entry(&entry, buf, sizeof(buf), &buf_size);
 
-    int ret = btree_insert(catalog->tree, 0, buf, CATALOG_ENTRY_SIZE);
+    int ret = btree_insert(catalog->tree, 0, buf, (uint32_t)buf_size);
     if (ret != SUCCESS) {
         return ret;
     }
@@ -154,18 +291,14 @@ int catalog_init(Catalog* catalog) {
 int catalog_insert(Catalog* catalog, const CatalogEntry* entry) {
     if (!catalog || !entry) return ERR_INTERNAL;
 
-    /* Use type + name as key for uniqueness */
-    uint64_t key = 0;
-    if (entry->type == CATALOG_TYPE_TABLE) {
-        key = 1 + (uint64_t)strlen(entry->name);
-    } else {
-        key = 0x80000000 + (uint64_t)strlen(entry->name);
-    }
+    /* Use monotonic counter for unique keys - avoids collisions from same-length names */
+    uint64_t key = catalog->next_key++;
 
-    char buf[CATALOG_ENTRY_SIZE];
-    serialize_entry(entry, buf);
+    char buf[CATALOG_ENTRY_MAX_SIZE];
+    size_t buf_size = 0;
+    serialize_entry(entry, buf, sizeof(buf), &buf_size);
 
-    return btree_insert(catalog->tree, key, buf, CATALOG_ENTRY_SIZE);
+    return btree_insert(catalog->tree, key, buf, (uint32_t)buf_size);
 }
 
 int catalog_delete(Catalog* catalog, CatalogEntryType type, const char* name) {
@@ -220,7 +353,8 @@ CatalogEntry** catalog_get_tables(Catalog* catalog, int* count) {
 
     while (catalog_cursor_valid(cursor)) {
         CatalogEntry* entry = catalog_cursor_get(cursor);
-        if (entry && entry->type == CATALOG_TYPE_TABLE) {
+        if (entry && entry->type == CATALOG_TYPE_TABLE &&
+            strcmp(entry->name, CATALOG_TABLE_NAME) != 0) {
             CatalogEntry** new_entries = realloc(entries, (*count + 1) * sizeof(CatalogEntry*));
             if (!new_entries) {
                 catalog_free_entries(entries, *count);
@@ -233,6 +367,7 @@ CatalogEntry** catalog_get_tables(Catalog* catalog, int* count) {
                 memcpy(entries[*count], entry, sizeof(CatalogEntry));
                 (*count)++;
             }
+            free(entry);  /* catalog_cursor_get allocates fresh copy each call */
         }
         catalog_cursor_next(cursor);
     }
@@ -278,9 +413,38 @@ CatalogEntry** catalog_get_indexes(Catalog* catalog, const char* table_name, int
 void catalog_free_entries(CatalogEntry** entries, int count) {
     if (!entries) return;
     for (int i = 0; i < count; i++) {
-        if (entries[i]) free(entries[i]);
+        if (entries[i]) {
+            /* Free column data if present */
+            if (entries[i]->columns) {
+                free(entries[i]->columns);
+            }
+            free(entries[i]);
+        }
     }
     free(entries);
+}
+
+ColumnInfo* catalog_get_columns(Catalog* catalog, const char* table_name, int* column_count) {
+    if (!catalog || !table_name || !column_count) return NULL;
+
+    *column_count = 0;
+
+    CatalogEntry* entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, table_name);
+    if (!entry) return NULL;
+
+    if (entry->column_count > 0 && entry->columns) {
+        /* Return a copy of the column info */
+        ColumnInfo* cols = malloc(entry->column_count * sizeof(ColumnInfo));
+        if (cols) {
+            memcpy(cols, entry->columns, entry->column_count * sizeof(ColumnInfo));
+            *column_count = entry->column_count;
+        }
+        free(entry);
+        return cols;
+    }
+
+    free(entry);
+    return NULL;
 }
 
 /*============================================================================
@@ -313,20 +477,25 @@ void catalog_cursor_next(CatalogCursor* cursor) {
 CatalogEntry* catalog_cursor_get(CatalogCursor* cursor) {
     if (!cursor || cursor->is_end) return NULL;
 
-    static CatalogEntry entry;
+    /* Allocate fresh copy each time - caller must free */
+    CatalogEntry* entry = calloc(1, sizeof(CatalogEntry));
+    if (!entry) return NULL;
+
     uint64_t key;
-    char buf[CATALOG_ENTRY_SIZE];
+    char buf[CATALOG_ENTRY_MAX_SIZE];
     uint32_t len = sizeof(buf);
 
     if (btree_get(cursor->btree_cursor, &key, buf, &len) != SUCCESS) {
+        free(entry);
         return NULL;
     }
 
-    if (deserialize_entry(buf, &entry) != SUCCESS) {
+    if (deserialize_entry(buf, len, entry) != SUCCESS) {
+        free(entry);
         return NULL;
     }
 
-    return &entry;
+    return entry;
 }
 
 int catalog_cursor_valid(CatalogCursor* cursor) {

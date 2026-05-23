@@ -21,6 +21,20 @@ typedef enum {
 } CatalogEntryType;
 
 /*============================================================================
+ * Column Information (for DESC output)
+ *============================================================================*/
+#define MAX_TABLE_COLUMNS 64
+
+typedef struct {
+    char name[64];          /* Column name */
+    int type;               /* ColumnType (COL_TYPE_INTEGER, etc.) */
+    int not_null;           /* 1 if NOT NULL, 0 otherwise */
+    int primary_key;        /* 1 if PRIMARY KEY, 0 otherwise */
+    int autoincrement;      /* 1 if AUTOINCREMENT, 0 otherwise */
+    char default_val[128]; /* Default value as string, empty if none */
+} ColumnInfo;
+
+/*============================================================================
  * Catalog Entry (tinydb_master row)
  *============================================================================*/
 
@@ -31,6 +45,10 @@ typedef struct {
     char sql[512];             /* CREATE statement */
     uint32_t root_page;        /* B+tree root page for table data */
     int is_valid;               /* Entry is valid */
+
+    /* Column metadata for DESC output */
+    ColumnInfo* columns;       /* Array of column info, NULL if not set */
+    int column_count;           /* Number of columns in the table */
 } CatalogEntry;
 
 /*============================================================================
@@ -44,6 +62,7 @@ typedef struct Catalog {
 
     pthread_mutex_t mutex;
     int is_open;
+    uint64_t next_key;         /* Monotonic counter for unique keys */
 } Catalog;
 
 /*============================================================================
@@ -79,6 +98,9 @@ CatalogEntry** catalog_get_tables(Catalog* catalog, int* count);
 
 /* Get all indexes for a table */
 CatalogEntry** catalog_get_indexes(Catalog* catalog, const char* table_name, int* count);
+
+/* Get columns for a table (for DESC output) */
+ColumnInfo* catalog_get_columns(Catalog* catalog, const char* table_name, int* column_count);
 
 /* Free catalog entry array */
 void catalog_free_entries(CatalogEntry** entries, int count);
