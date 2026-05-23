@@ -81,6 +81,8 @@ typedef enum {
     TOKEN_UNIQUE,
     TOKEN_DEFAULT,
     TOKEN_AUTOINCREMENT,
+    TOKEN_SHOW,
+    TOKEN_DESCRIBE,
 
     /* Data types */
     TOKEN_INTEGER_KW,

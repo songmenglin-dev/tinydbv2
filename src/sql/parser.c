@@ -22,6 +22,8 @@ static inline AstUpdate* cast_update(AstNode* n) { return (AstUpdate*)n; }
 static inline AstDelete* cast_delete(AstNode* n) { return (AstDelete*)n; }
 static inline AstSelect* cast_select(AstNode* n) { return (AstSelect*)n; }
 static inline AstTransaction* cast_transaction(AstNode* n) { return (AstTransaction*)n; }
+static inline AstShowTables* cast_show_tables(AstNode* n) { return (AstShowTables*)n; }
+static inline AstDescribeTable* cast_describe_table(AstNode* n) { return (AstDescribeTable*)n; }
 
 /*============================================================================
  * Parser structure
@@ -135,6 +137,8 @@ static int keyword_to_token_type(const char* kw) {
     if (strcmp(kw, "UNIQUE") == 0) return TOKEN_UNIQUE;
     if (strcmp(kw, "DEFAULT") == 0) return TOKEN_DEFAULT;
     if (strcmp(kw, "AUTOINCREMENT") == 0) return TOKEN_AUTOINCREMENT;
+    if (strcmp(kw, "SHOW") == 0) return TOKEN_SHOW;
+    if (strcmp(kw, "DESCRIBE") == 0) return TOKEN_DESCRIBE;
     return -1;
 }
 
@@ -499,6 +503,8 @@ static AstNode* parse_update(Parser* parser);
 static AstNode* parse_delete(Parser* parser);
 static AstNode* parse_select(Parser* parser);
 static AstNode* parse_transaction(Parser* parser);
+static AstNode* parse_show_tables(Parser* parser);
+static AstNode* parse_describe_table(Parser* parser);
 
 static AstNode* parse_statement(Parser* parser) {
     switch (parser->current_token.type) {
@@ -539,6 +545,13 @@ static AstNode* parse_statement(Parser* parser) {
         case TOKEN_SELECT:
             return parse_select(parser);
 
+        case TOKEN_SHOW:
+            return parse_show_tables(parser);
+
+        case TOKEN_DESCRIBE:
+        case TOKEN_DESC:
+            return parse_describe_table(parser);
+
         case TOKEN_BEGIN:
         case TOKEN_COMMIT:
         case TOKEN_ROLLBACK:
@@ -566,6 +579,30 @@ static ColumnType parse_column_type(Parser* parser) {
     if (parser->current_token.type == TOKEN_BLOB_KW || check_keyword(parser, "BLOB")) {
         advance(parser);
         return COL_TYPE_BLOB;
+    }
+    /* Fallback: check if identifier is a type keyword (handles case-insensitive matching) */
+    if (parser->current_token.type == TOKEN_IDENTIFIER) {
+        const char* text = token_get_text(&parser->current_token);
+        if (text && strcasecmp(text, "INTEGER") == 0) {
+            advance(parser);
+            return COL_TYPE_INTEGER;
+        }
+        if (text && strcasecmp(text, "FLOAT") == 0) {
+            advance(parser);
+            return COL_TYPE_FLOAT;
+        }
+        if (text && strcasecmp(text, "TEXT") == 0) {
+            advance(parser);
+            return COL_TYPE_TEXT;
+        }
+        if (text && strcasecmp(text, "REAL") == 0) {
+            advance(parser);
+            return COL_TYPE_FLOAT;
+        }
+        if (text && strcasecmp(text, "BLOB") == 0) {
+            advance(parser);
+            return COL_TYPE_BLOB;
+        }
     }
     return COL_TYPE_TEXT; /* Default */
 }
@@ -1235,6 +1272,29 @@ static AstNode* parse_transaction(Parser* parser) {
 
     AstNode* node = ast_create(AST_TRANSACTION, sizeof(AstTransaction));
     cast_transaction(node)->transaction_type = tx_type;
+    return node;
+}
+
+/*============================================================================
+ * SHOW TABLES and DESCRIBE TABLE parsing
+ *============================================================================*/
+static AstNode* parse_show_tables(Parser* parser) {
+    advance(parser); /* SHOW or DESCRIBE was already consumed */
+
+    expect_keyword(parser, "TABLES", "Expected TABLES after SHOW");
+
+    AstNode* node = ast_create(AST_SHOW_TABLES, sizeof(AstShowTables));
+    return node;
+}
+
+static AstNode* parse_describe_table(Parser* parser) {
+    advance(parser); /* DESCRIBE was already consumed */
+
+    char* table_name = parse_identifier(parser);
+    if (!table_name) return NULL;
+
+    AstNode* node = ast_create(AST_DESCRIBE_TABLE, sizeof(AstDescribeTable));
+    cast_describe_table(node)->table_name = table_name;
     return node;
 }
 
