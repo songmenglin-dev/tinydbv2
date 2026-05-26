@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /*============================================================================
  * Constants
@@ -838,7 +840,9 @@ int btree_insert(BTree* tree, uint64_t key, const void* value, uint32_t len) {
 
 /* Delete a key from the B+tree */
 int btree_delete(BTree* tree, uint64_t key) {
-    if (!tree || !tree->is_open) return -1;
+    if (!tree || !tree->is_open) {
+        return -1;
+    }
 
     /* Find the leaf page containing the key */
     BTreeCursor* cursor = btree_find(tree, key);
@@ -862,15 +866,10 @@ int btree_delete(BTree* tree, uint64_t key) {
     int cell_count = header.cell_count;
     int delete_idx = cursor->cell;
 
-    if (delete_idx < 0 || delete_idx >= cell_count) {
-        page_unpin(page);
-        btree_cursor_free(cursor);
-        return -1;
-    }
-
     /* Remove cell by shifting pointers */
-    for (int i = delete_idx; i < cell_count - 1; i--) {
-        set_cell_pointer(page->data, i, get_cell_pointer(page->data, i + 1));
+    if (delete_idx < cell_count - 1) {
+        uint16_t src_ptr = get_cell_pointer(page->data, delete_idx + 1);
+        set_cell_pointer(page->data, delete_idx, src_ptr);
     }
 
     header.cell_count--;
@@ -981,9 +980,186 @@ uint32_t btree_page_count(BTree* tree) {
 }
 
 int btree_verify(BTree* tree) {
-    (void)tree;
-    /* TODO: implement verify */
-    return 0;
+    if (!tree || !tree->is_open || !tree->pager || !tree->cache) {
+        return ERR_INTERNAL;
+    }
+
+    uint32_t root = tree->root_page;
+    if (root == 0) {
+        /* Empty tree - just verify root page exists */
+        Page* page = page_pin(tree->cache, root);
+        if (!page) return ERR_STORAGE_IO;
+
+        BTreeNodeHeader header = get_node_header(page->data);
+        page_unpin(page);
+
+        if (header.cell_count != 0) {
+            return ERR_STORAGE_CORRUPT;
+        }
+        return SUCCESS;
+    }
+
+    /* Collect all reachable pages via BFS */
+    uint32_t max_page = tree->page_count;
+    if (max_page == 0) {
+        /* page_count not set; compute from file size */
+        struct stat st;
+        if (fstat(tree->pager->fd, &st) < 0) {
+            return ERR_STORAGE_IO;
+        }
+        max_page = (uint32_t)(st.st_size / PAGE_SIZE);
+        if (st.st_size % PAGE_SIZE != 0) {
+            return ERR_STORAGE_CORRUPT;
+        }
+    }
+
+    /* visited[page] = 1: page is reachable from root */
+    uint8_t* visited = calloc(max_page, sizeof(uint8_t));
+    if (!visited) return ERR_OUT_OF_MEMORY;
+
+    /* queue for BFS */
+    uint32_t* queue = malloc(max_page * sizeof(uint32_t));
+    if (!queue) {
+        free(visited);
+        return ERR_OUT_OF_MEMORY;
+    }
+
+    uint32_t qhead = 0;
+    uint32_t qtail = 0;
+    queue[qtail++] = root;
+
+    while (qhead < qtail) {
+        uint32_t page_num = queue[qhead++];
+        if (page_num >= max_page) {
+            free(visited);
+            free(queue);
+            return ERR_STORAGE_CORRUPT;
+        }
+        if (visited[page_num]) {
+            /* cycle detected */
+            free(visited);
+            free(queue);
+            return ERR_STORAGE_CORRUPT;
+        }
+        visited[page_num] = 1;
+
+        Page* page = page_pin(tree->cache, page_num);
+        if (!page) {
+            free(visited);
+            free(queue);
+            return ERR_STORAGE_IO;
+        }
+
+        BTreeNodeHeader header = get_node_header(page->data);
+        uint8_t ptype = header.page_type;
+
+        if (ptype != BTREE_PAGE_TYPE_LEAF && ptype != BTREE_PAGE_TYPE_INTERNAL) {
+            page_unpin(page);
+            free(visited);
+            free(queue);
+            return ERR_STORAGE_CORRUPT;
+        }
+
+        int cell_count = (int)header.cell_count;
+        if (cell_count < 0) {
+            page_unpin(page);
+            free(visited);
+            free(queue);
+            return ERR_STORAGE_CORRUPT;
+        }
+
+        if (ptype == BTREE_PAGE_TYPE_LEAF) {
+            /* Verify leaf page structure */
+            uint16_t content_start = header.content_start;
+            if (content_start < BTREE_LEAF_HEADER_SIZE ||
+                content_start > PAGE_SIZE) {
+                page_unpin(page);
+                free(visited);
+                free(queue);
+                return ERR_STORAGE_CORRUPT;
+            }
+
+            /* Check each cell pointer is valid */
+            for (int i = 0; i < cell_count; i++) {
+                uint16_t cell_ptr = get_cell_pointer(page->data, i);
+                if (cell_ptr < BTREE_LEAF_HEADER_SIZE ||
+                    cell_ptr >= PAGE_SIZE) {
+                    page_unpin(page);
+                    free(visited);
+                    free(queue);
+                    return ERR_STORAGE_CORRUPT;
+                }
+
+                /* Verify payload and key_size are readable */
+                if (cell_ptr + 8 > PAGE_SIZE) {
+                    page_unpin(page);
+                    free(visited);
+                    free(queue);
+                    return ERR_STORAGE_CORRUPT;
+                }
+                uint32_t payload = read_u32(page->data, cell_ptr);
+                uint32_t key_size = read_u32(page->data, cell_ptr + 4);
+                uint32_t cell_total = 8 + payload;
+                if (cell_ptr + cell_total > PAGE_SIZE) {
+                    page_unpin(page);
+                    free(visited);
+                    free(queue);
+                    return ERR_STORAGE_CORRUPT;
+                }
+                if (key_size != sizeof(uint64_t)) {
+                    page_unpin(page);
+                    free(visited);
+                    free(queue);
+                    return ERR_STORAGE_CORRUPT;
+                }
+            }
+
+            /* Verify right_sibling pointer if not zero */
+            uint32_t sibling = get_right_sibling(page->data);
+            (void)sibling;
+            page_unpin(page);
+
+        } else {
+            /* Internal node - collect child pointers */
+            uint32_t right_child = get_right_child(page->data);
+            if (right_child >= max_page) {
+                page_unpin(page);
+                free(visited);
+                free(queue);
+                return ERR_STORAGE_CORRUPT;
+            }
+
+            for (int i = 0; i < cell_count; i++) {
+                off_t cell_offset = get_cell_pointer(page->data, i);
+                if (cell_offset < BTREE_INTERNAL_HEADER_SIZE ||
+                    cell_offset + 4 > PAGE_SIZE) {
+                    page_unpin(page);
+                    free(visited);
+                    free(queue);
+                    return ERR_STORAGE_CORRUPT;
+                }
+                uint32_t child = read_u32(page->data, cell_offset);
+                if (child >= max_page) {
+                    page_unpin(page);
+                    free(visited);
+                    free(queue);
+                    return ERR_STORAGE_CORRUPT;
+                }
+                if (qtail < max_page) {
+                    queue[qtail++] = child;
+                }
+            }
+
+            if (right_child != 0 && qtail < max_page) {
+                queue[qtail++] = right_child;
+            }
+            page_unpin(page);
+        }
+    }
+
+    free(visited);
+    free(queue);
+    return SUCCESS;
 }
 
 void btree_print(BTree* tree) {
