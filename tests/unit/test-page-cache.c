@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
 
 /*============================================================================
  * Test declarations
@@ -244,45 +245,4 @@ test(page_cache_lru_eviction) {
     pager_close(pager);
     remove_test_db(path);
     free(path);
-}
-
-/*============================================================================
- * Test runner
- *============================================================================*/
-int main(int argc, char** argv) {
-    int run_unit = 0;
-    int run_integration = 0;
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--unit") == 0) run_unit = 1;
-        if (strcmp(argv[i], "--integration") == 0) run_integration = 1;
-    }
-
-    printf("TinyDB v2 Page Cache Tests\n");
-    printf("==========================\n\n");
-
-    if (run_unit) {
-        printf("Unit Tests:\n");
-
-        run(page_cache_create_and_destroy);
-        run(page_cache_get_page);
-        run(page_cache_pin_unpin);
-        run(page_cache_mark_dirty);
-        run(page_cache_flush);
-        run(page_cache_stats);
-        run(page_cache_hit_rate);
-        run(page_cache_lru_eviction);
-
-        printf("\nAll page cache unit tests passed!\n");
-    }
-
-    if (run_integration) {
-        printf("\nIntegration Tests:\n");
-        printf("  (none configured yet)\n");
-    }
-
-    printf("\n==========================\n");
-    printf("Page cache test suite completed.\n");
-
-    return 0;
 }

@@ -1,3 +1,8 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#define _POSIX_C_SOURCE 200809L
+
 #include "mini_test.h"
 #include "../../src/util/string.h"
 #include "../../src/util/error.h"
@@ -7,6 +12,7 @@
 #include "../../src/sql/ast.h"
 #include "../../src/sql/schema.h"
 #include "../../src/storage/pager.h"
+#include "../../src/storage/page_cache.h"
 
 #include <string.h>
 
@@ -64,6 +70,34 @@ test(pager_free_and_reuse_pages);
 test(pager_header_operations);
 test(pager_validate_magic);
 test(pager_page_offset);
+test(page_cache_create_and_destroy);
+test(page_cache_get_page);
+test(page_cache_pin_unpin);
+test(page_cache_mark_dirty);
+test(page_cache_flush);
+test(page_cache_stats);
+test(page_cache_hit_rate);
+test(page_cache_lru_eviction);
+
+/* Catalog tests */
+test(catalog_entry_creation);
+test(catalog_entry_types);
+test(catalog_cursor_struct_size);
+test(catalog_constants);
+test(catalog_column_info_struct);
+test(column_serialize_deserialize);
+test(column_serialize_round_trip);
+test(entry_serialize_deserialize);
+test(entry_serialize_round_trip);
+test(catalog_open_close);
+test(catalog_init_and_reopen);
+test(catalog_insert_entry);
+test(catalog_lookup_by_type_name);
+test(catalog_get_tables);
+test(catalog_get_tables_empty);
+test(catalog_cursor_iterate);
+test(catalog_cursor_next_and_valid);
+test(catalog_free_entries);
 
 /*============================================================================
  * String tests
@@ -770,6 +804,32 @@ int main(int argc, char** argv) {
         run(pager_header_operations);
         run(pager_validate_magic);
         run(pager_page_offset);
+        run(page_cache_create_and_destroy);
+        run(page_cache_get_page);
+        run(page_cache_pin_unpin);
+        run(page_cache_mark_dirty);
+        run(page_cache_flush);
+        run(page_cache_stats);
+        run(page_cache_hit_rate);
+        run(page_cache_lru_eviction);
+        run(catalog_entry_creation);
+        run(catalog_entry_types);
+        run(catalog_cursor_struct_size);
+        run(catalog_constants);
+        run(catalog_column_info_struct);
+        run(column_serialize_deserialize);
+        run(column_serialize_round_trip);
+        run(entry_serialize_deserialize);
+        run(entry_serialize_round_trip);
+        run(catalog_open_close);
+        run(catalog_init_and_reopen);
+        run(catalog_insert_entry);
+        run(catalog_lookup_by_type_name);
+        run(catalog_get_tables);
+        run(catalog_get_tables_empty);
+        run(catalog_cursor_iterate);
+        run(catalog_cursor_next_and_valid);
+        run(catalog_free_entries);
         run(sql_int_literal);
         run(sql_negative_int_literal);
         run(sql_float_literal);
