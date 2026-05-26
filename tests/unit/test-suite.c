@@ -6,6 +6,7 @@
 #include "../../src/sql/parser.h"
 #include "../../src/sql/ast.h"
 #include "../../src/sql/schema.h"
+#include "../../src/storage/pager.h"
 
 #include <string.h>
 
@@ -55,6 +56,14 @@ test(schema_validate_row_type_mismatch);
 test(schema_validate_row_column_count_mismatch);
 test(schema_validate_row_corrupt_buffer);
 test(schema_validate_row_null_nullable);
+test(pager_create_and_close);
+test(pager_create_and_open);
+test(pager_allocate_pages);
+test(pager_read_write_page);
+test(pager_free_and_reuse_pages);
+test(pager_header_operations);
+test(pager_validate_magic);
+test(pager_page_offset);
 
 /*============================================================================
  * String tests
@@ -753,6 +762,14 @@ int main(int argc, char** argv) {
         run(schema_validate_row_column_count_mismatch);
         run(schema_validate_row_corrupt_buffer);
         run(schema_validate_row_null_nullable);
+        run(pager_create_and_close);
+        run(pager_create_and_open);
+        run(pager_allocate_pages);
+        run(pager_read_write_page);
+        run(pager_free_and_reuse_pages);
+        run(pager_header_operations);
+        run(pager_validate_magic);
+        run(pager_page_offset);
         run(sql_int_literal);
         run(sql_negative_int_literal);
         run(sql_float_literal);

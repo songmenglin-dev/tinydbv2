@@ -179,40 +179,4 @@ test(pager_page_offset) {
 /*============================================================================
  * Test runner
  *============================================================================*/
-int main(int argc, char** argv) {
-    int run_unit = 0;
-    int run_integration = 0;
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--unit") == 0) run_unit = 1;
-        if (strcmp(argv[i], "--integration") == 0) run_integration = 1;
-    }
-
-    printf("TinyDB v2 Storage Tests\n");
-    printf("=======================\n\n");
-
-    if (run_unit) {
-        printf("Unit Tests:\n");
-
-        run(pager_create_and_close);
-        run(pager_create_and_open);
-        run(pager_allocate_pages);
-        run(pager_read_write_page);
-        run(pager_free_and_reuse_pages);
-        run(pager_header_operations);
-        run(pager_validate_magic);
-        run(pager_page_offset);
-
-        printf("\nAll pager unit tests passed!\n");
-    }
-
-    if (run_integration) {
-        printf("\nIntegration Tests:\n");
-        printf("  (none configured yet)\n");
-    }
-
-    printf("\n=======================\n");
-    printf("Storage test suite completed.\n");
-
-    return 0;
-}
+/* Tests are run via test-suite.c - main() removed to avoid duplicate symbols */
