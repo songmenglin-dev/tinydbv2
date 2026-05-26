@@ -52,6 +52,34 @@ typedef struct {
 } CatalogEntry;
 
 /*============================================================================
+ * Serialization (public for testing)
+ *============================================================================*/
+
+/* Serialized column info: name(64) + type(4) + not_null(4) + primary_key(4) + autoincrement(4) + default_val(128) = 208 bytes */
+#define COLUMN_INFO_SIZE 208
+
+/*
+ * Catalog entry serialized format:
+ * type(4) + name(64) + tbl_name(64) + sql(512) + root_page(4) + is_valid(4) + column_count(4) + columns(var)
+ * Minimum size: 656 bytes (no columns)
+ * With columns: 656 + 4 + column_count * 208 bytes
+ */
+#define CATALOG_ENTRY_BASE_SIZE 656
+#define CATALOG_ENTRY_MAX_SIZE (CATALOG_ENTRY_BASE_SIZE + MAX_TABLE_COLUMNS * COLUMN_INFO_SIZE)
+
+/* Serialize a single column's metadata */
+int serialize_column_info(const ColumnInfo* col, void* buf);
+
+/* Deserialize a single column's metadata */
+int deserialize_column_info(const void* buf, ColumnInfo* col);
+
+/* Serialize a full catalog entry */
+int serialize_entry(const CatalogEntry* entry, void* buf, size_t buf_size, size_t* out_size);
+
+/* Deserialize a full catalog entry (allocates columns array on success) */
+int deserialize_entry(const void* buf, size_t buf_size, CatalogEntry* entry);
+
+/*============================================================================
  * Catalog Structure
  *============================================================================*/
 

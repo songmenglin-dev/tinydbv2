@@ -11,9 +11,8 @@
  *============================================================================*/
 
 /* Serialized column info: name(64) + type(4) + not_null(4) + primary_key(4) + autoincrement(4) + default_val(128) = 208 bytes */
-#define COLUMN_INFO_SIZE 208
 
-static int serialize_column_info(const ColumnInfo* col, void* buf) {
+int serialize_column_info(const ColumnInfo* col, void* buf) {
     if (!col || !buf) return ERR_INTERNAL;
 
     uint8_t* data = (uint8_t*)buf;
@@ -51,7 +50,7 @@ static int serialize_column_info(const ColumnInfo* col, void* buf) {
     return SUCCESS;
 }
 
-static int deserialize_column_info(const void* buf, ColumnInfo* col) {
+int deserialize_column_info(const void* buf, ColumnInfo* col) {
     if (!buf || !col) return ERR_INTERNAL;
 
     const uint8_t* data = (const uint8_t*)buf;
@@ -97,7 +96,7 @@ static int deserialize_column_info(const void* buf, ColumnInfo* col) {
 #define CATALOG_ENTRY_BASE_SIZE 656
 #define CATALOG_ENTRY_MAX_SIZE (CATALOG_ENTRY_BASE_SIZE + MAX_TABLE_COLUMNS * COLUMN_INFO_SIZE)
 
-static int serialize_entry(const CatalogEntry* entry, void* buf, size_t buf_size, size_t* out_size) {
+int serialize_entry(const CatalogEntry* entry, void* buf, size_t buf_size, size_t* out_size) {
     if (!entry || !buf) return ERR_INTERNAL;
 
     uint8_t* data = (uint8_t*)buf;
@@ -149,7 +148,7 @@ static int serialize_entry(const CatalogEntry* entry, void* buf, size_t buf_size
     return SUCCESS;
 }
 
-static int deserialize_entry(const void* buf, size_t buf_size, CatalogEntry* entry) {
+int deserialize_entry(const void* buf, size_t buf_size, CatalogEntry* entry) {
     if (!buf || !entry) return ERR_INTERNAL;
 
     /* Initialize columns to NULL for proper cleanup on error */
