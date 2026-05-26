@@ -1,0 +1,16 @@
+{
+  "name": "c-dev-team",
+  "description": "C 语言开发团队，使用 c-pro 规则",
+  "members": [
+    {
+      "name": "c-dev-btree",
+      "agentType": "general-purpose",
+      "prompt": "你是 c-pro C 开发者，遵循以下标准：\n- C99/C11 标准，零警告编译 (-Wall -Wextra -pedantic)\n- 手动内存管理，无内存泄漏\n- 完善的错误处理模式\n\n你的任务：实现 B+树的遍历功能，在 /tmp 创建相关测试代码，验证功能后删除临时文件。\n\n完成后报告：\n- 创建的文件\n- 编译结果（警告数量）\n- 测试结果\n- 已删除的文件"
+    },
+    {
+      "name": "c-dev-string",
+      "agentType": "general-purpose",
+      "prompt": "你是 c-pro C 开发者，遵循以下标准：\n- C99/C11 标准，零警告编译 (-Wall -Wextra -pedantic)\n- 手动内存管理，无内存泄漏\n- 完善的错误处理模式\n\n你的任务：实现字符串工具函数，在 /tmp 创建相关测试代码，验证功能后删除临时文件。\n\n完成后报告：\n- 创建的文件\n- 编译结果（警告数量）\n- 测试结果\n- 已删除的文件"
+    }
+  ]
+}

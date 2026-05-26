@@ -245,9 +245,8 @@ static Expression* parse_literal(Parser* parser) {
 
                 expr = expr_create(EXPR_COLUMN, sizeof(Expression));
                 expr->as_column.col_name = col_name;
-                /* Store table name in a placeholder - in actual impl would be different */
-                (void)table_name; /* TODO: Handle qualified names properly */
-                free(table_name);
+                expr->as_column.table_name = table_name;
+                expr->as_column.col_index = -1;
             } else {
                 /* Simple column reference */
                 expr = expr_create(EXPR_COLUMN, sizeof(Expression));
@@ -341,7 +340,7 @@ static int is_right_assoc(TokenType type) {
 }
 
 static Expression* parse_binary_expr(Parser* parser, int min_prec) {
-    (void)min_prec; /* TODO: implement precedence climbing properly */
+    (void)min_prec;  /* Reserved for future precedence enhancements */
     Expression* left = parse_unary_not(parser);
     if (!left || parser->has_error) return left;
 
@@ -440,6 +439,9 @@ static Expression* parse_binary_expr(Parser* parser, int min_prec) {
         }
 
         if (prec == 0) break;
+
+        /* Precedence climbing: stop if operator precedence is lower than min_prec */
+        if (prec < min_prec) break;
 
         /* Check for IS [NOT] NULL special case */
         if (op == TOKEN_IS) {
@@ -587,6 +589,10 @@ static ColumnType parse_column_type(Parser* parser) {
             advance(parser);
             return COL_TYPE_INTEGER;
         }
+        if (text && strcasecmp(text, "INT") == 0) {
+            advance(parser);
+            return COL_TYPE_INTEGER;
+        }
         if (text && strcasecmp(text, "FLOAT") == 0) {
             advance(parser);
             return COL_TYPE_FLOAT;
@@ -624,12 +630,21 @@ static ColumnDef* parse_column_def(Parser* parser) {
 
     /* Parse optional constraints */
     while (1) {
-        if (check_keyword(parser, "NOT") && 1) { /* TODO: lookahead properly */
-            /* NOT NULL */
-            advance(parser); /* NOT */
-            advance(parser); /* NULL */
-            col->not_null = 1;
-        } else if (check_keyword(parser, "PRIMARY")) {
+        if (check_keyword(parser, "NOT")) {
+            /* Peek ahead to see if NOT is followed by NULL */
+            Token peek = lexer_peek_token(parser->lexer);
+            if (peek.type == TOKEN_NULL ||
+                (peek.type == TOKEN_IDENTIFIER &&
+                 strcasecmp(token_get_text(&peek), "NULL") == 0)) {
+                /* NOT NULL */
+                advance(parser); /* NOT */
+                advance(parser); /* NULL */
+                col->not_null = 1;
+                continue;
+            }
+            /* NOT without NULL - this keyword is used elsewhere, break and let caller handle */
+        }
+        if (check_keyword(parser, "PRIMARY")) {
             advance(parser);
             if (check_keyword(parser, "KEY")) {
                 advance(parser);
@@ -1171,17 +1186,32 @@ static AstNode* parse_select(Parser* parser) {
         return NULL;
     }
 
-    /* Optional alias */
+    /* Optional alias - look ahead to determine if this identifier is an alias */
     char* alias = NULL;
     if (parser->current_token.type == TOKEN_IDENTIFIER) {
-        /* Could be alias or something else */
-        if (1) { /* Simple heuristic - might be alias */
-            /* Check if next token suggests it's an alias (not comma, semicolon, WHERE, etc) */
-            /* For simplicity, we'll just allow it */
-            /* Actually, we need to be more careful here */
+        Token peek = lexer_peek_token(parser->lexer);
+        /* Alias is present if next token is AS or if next token is an identifier and
+         * not followed by a keyword that would end the FROM clause */
+        if (check_keyword(parser, "AS")) {
+            /* Explicit AS keyword: SELECT * FROM t AS alias */
+            advance(parser); /* AS */
+            alias = parse_identifier(parser);
+        } else if (peek.type == TOKEN_IDENTIFIER || peek.type == TOKEN_AS) {
+            /* Implicit alias: SELECT * FROM t alias - peek ahead to confirm */
+            /* Check if next token is a keyword that would end the FROM clause */
+            int is_end_keyword = (peek.type == TOKEN_WHERE ||
+                                  peek.type == TOKEN_ORDER ||
+                                  peek.type == TOKEN_LIMIT ||
+                                  peek.type == TOKEN_OFFSET ||
+                                  peek.type == TOKEN_SEMICOLON ||
+                                  peek.type == TOKEN_COMMA ||
+                                  peek.type == TOKEN_EOF);
+            if (!is_end_keyword) {
+                /* This identifier is an alias */
+                alias = parse_identifier(parser);
+            }
         }
     }
-    (void)alias; /* TODO */
 
     /* WHERE clause (optional) */
     Expression* where = NULL;
@@ -1236,6 +1266,7 @@ static AstNode* parse_select(Parser* parser) {
     cast_select(node)->columns = columns;
     cast_select(node)->is_distinct = is_distinct;
     cast_select(node)->table_name = table_name;
+    cast_select(node)->alias = alias;
     cast_select(node)->where = where;
     cast_select(node)->order_by = order_by;
     cast_select(node)->limit = limit;
