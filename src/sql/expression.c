@@ -4,8 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <inttypes.h>
 #include <ctype.h>
 #include <errno.h>
+#include <strings.h>
+#include <strings.h>  /* for strcasecmp */
 
 /*============================================================================
  * Memory allocation helper
@@ -157,6 +161,137 @@ int value_is_truthy(const Value* val) {
 /*============================================================================
  * Expression evaluation
  *============================================================================*/
+/* Aggregate function state (passed via row_data context) */
+typedef struct AggState {
+    int64_t count;
+    double sum;
+    double min;
+    double max;
+    int has_value;
+} AggState;
+
+/* Evaluate a function call expression (COUNT, SUM, AVG, MAX, MIN, etc.) */
+static Value* eval_func(Expression* expr, Value* row_data, int column_count, const char** column_names) {
+    if (!expr || expr->type != EXPR_FUNC) return value_from_null();
+
+    const char* name = expr->as_func.name;
+    if (!name) return value_from_null();
+
+    /* Case-insensitive function name comparison */
+    int is_count = (strcasecmp(name, "COUNT") == 0);
+    int is_sum = (strcasecmp(name, "SUM") == 0);
+    int is_avg = (strcasecmp(name, "AVG") == 0);
+    int is_min = (strcasecmp(name, "MIN") == 0);
+    int is_max = (strcasecmp(name, "MAX") == 0);
+    int is_coalesce = (strcasecmp(name, "COALESCE") == 0);
+
+    /* COALESCE: return first non-null argument */
+    if (is_coalesce) {
+        for (int i = 0; i < expr->as_func.arg_count; i++) {
+            Value* arg = expr_eval(expr->as_func.args[i], row_data, column_count, column_names);
+            if (!value_is_null(arg)) {
+                /* Transfer ownership - caller will free result */
+                return arg;
+            }
+            value_free(arg);
+        }
+        return value_from_null();
+    }
+
+    /* Handle COUNT(*) separately - no argument evaluation needed */
+    if (is_count && expr->as_func.arg_count == 0) {
+        /* COUNT(*) - count all rows, return 1 as a sentinel for the caller to aggregate */
+        return value_from_int(1);
+    }
+
+    /* For aggregate functions, evaluate the first argument */
+    if ((is_count || is_sum || is_avg || is_min || is_max) && expr->as_func.arg_count > 0) {
+        Value* arg = expr_eval(expr->as_func.args[0], row_data, column_count, column_names);
+
+        /* COUNT(column) - ignore nulls */
+        if (is_count) {
+            int result = value_is_null(arg) ? 0 : 1;
+            value_free(arg);
+            return value_from_int(result);  /* 1 if non-null, 0 if null */
+        }
+
+        /* SUM/AVG/MIN/MAX - require numeric values */
+        if (value_is_null(arg)) {
+            value_free(arg);
+            return value_from_null();
+        }
+
+        double num_val = 0.0;
+        int valid = 0;
+
+        if (arg->type == VALUE_INTEGER) {
+            num_val = (double)arg->as_int;
+            valid = 1;
+        } else if (arg->type == VALUE_FLOAT) {
+            num_val = arg->as_float;
+            valid = 1;
+        }
+
+        value_free(arg);
+
+        if (!valid) return value_from_null();
+
+        if (is_sum) return value_from_float(num_val);         /* SUM: return raw value for caller to accumulate */
+        if (is_avg) return value_from_float(num_val);         /* AVG: same pattern */
+        if (is_min) return value_from_float(num_val);        /* MIN: same */
+        if (is_max) return value_from_float(num_val);         /* MAX: same */
+    }
+
+    /* Unknown function */
+    return value_from_null();
+}
+
+/* Evaluate a CASE WHEN expression */
+static Value* eval_case(Expression* expr, Value* row_data, int column_count, const char** column_names) {
+    if (!expr || expr->type != EXPR_CASE) return value_from_null();
+
+    Expression* cond = expr->as_case.cond;
+    Expression* then = expr->as_case.then;
+    Expression* else_ = expr->as_case.else_;
+
+    /* Evaluate condition */
+    if (cond) {
+        Value* cond_val = expr_eval(cond, row_data, column_count, column_names);
+        int is_true = value_is_truthy(cond_val);
+        value_free(cond_val);
+
+        if (is_true && then) {
+            return expr_eval(then, row_data, column_count, column_names);
+        }
+    }
+
+    /* Fall through to ELSE */
+    if (else_) {
+        return expr_eval(else_, row_data, column_count, column_names);
+    }
+
+    return value_from_null();
+}
+
+/* Evaluate a subquery expression (scalar subquery in SELECT column, WHERE, etc.) */
+static Value* eval_subquery(Expression* expr, Value* row_data, int column_count, const char** column_names) {
+    (void)row_data;
+    (void)column_count;
+    (void)column_names;
+
+    if (!expr || expr->type != EXPR_SUBQUERY) return value_from_null();
+
+    AstNode* query = expr->as_subquery.query;
+    if (!query) return value_from_null();
+
+    /* Only support SELECT subqueries for now */
+    if (query->type != AST_SELECT) return value_from_null();
+
+    /* Delegate to executor for subquery execution */
+    extern Value* executor_evaluate_subquery(void* exec_ctx, AstNode* query);
+    return executor_evaluate_subquery(NULL, query);
+}
+
 Value* expr_eval(Expression* expr, Value* row_data, int column_count, const char** column_names) {
     if (!expr) return value_from_null();
 
@@ -182,10 +317,11 @@ Value* expr_eval(Expression* expr, Value* row_data, int column_count, const char
         case EXPR_BETWEEN:
             return eval_between(expr, row_data, column_count, column_names);
         case EXPR_FUNC:
+            return eval_func(expr, row_data, column_count, column_names);
         case EXPR_CASE:
+            return eval_case(expr, row_data, column_count, column_names);
         case EXPR_SUBQUERY:
-            /* TODO: Implement these later */
-            return value_from_null();
+            return eval_subquery(expr, row_data, column_count, column_names);
     }
     return value_from_null();
 }
@@ -198,18 +334,21 @@ Value* eval_column(Expression* expr, Value* row_data, int column_count, const ch
     if (!expr || !row_data || !column_names) return value_from_null();
 
     int col_index = expr->as_column.col_index;
-    if (col_index < 0 || col_index >= column_count) return value_from_null();
 
-    /* If column name is provided, verify it matches */
-    if (expr->as_column.col_name && column_names[col_index]) {
-        if (strcmp(expr->as_column.col_name, column_names[col_index]) != 0) {
-            /* Name mismatch, try to find by name */
+    /* If col_index is invalid or name is provided, try to find by name */
+    if (col_index < 0 || col_index >= column_count || expr->as_column.col_name) {
+        /* Name-based lookup */
+        if (expr->as_column.col_name) {
             for (int i = 0; i < column_count; i++) {
                 if (column_names[i] && strcmp(expr->as_column.col_name, column_names[i]) == 0) {
                     col_index = i;
                     break;
                 }
             }
+        }
+        /* If still invalid, return NULL */
+        if (col_index < 0 || col_index >= column_count) {
+            return value_from_null();
         }
     }
 
@@ -232,7 +371,7 @@ Value* eval_column(Expression* expr, Value* row_data, int column_count, const ch
 
 /* Binary operators */
 static int is_numericComparison(int op) {
-    return op == '=' || op == '<' || op == '>' || op == TOKEN_LTE || op == TOKEN_GTE || op == TOKEN_NEQ;
+    return op == '=' || op == TOKEN_EQ || op == '<' || op == '>' || op == TOKEN_LTE || op == TOKEN_GTE || op == TOKEN_NEQ;
 }
 
 Value* eval_binary(Expression* expr, Value* row_data, int column_count, const char** column_names) {
@@ -335,6 +474,7 @@ Value* eval_binary(Expression* expr, Value* row_data, int column_count, const ch
         if (left_valid && right_valid) {
             switch (op) {
                 case '=':  result = (left_num == right_num); break;
+                case TOKEN_EQ: result = (left_num == right_num); break;
                 case TOKEN_NEQ: result = (left_num != right_num); break;
                 case '<':  result = (left_num < right_num); break;
                 case '>':  result = (left_num > right_num); break;
@@ -576,4 +716,237 @@ Value* eval_between(Expression* expr, Value* row_data, int column_count, const c
     value_free(low);
     value_free(high);
     return value_from_int(result);
+}
+
+/*============================================================================
+ * Expression serialization
+ *============================================================================*/
+
+/* Internal helper: append to buffer with bounds checking, returns bytes written */
+static size_t expr_snprintf(char* buf, size_t buf_size, size_t offset, const char* fmt, ...) {
+    if (!buf || buf_size == 0) return 0;
+    if (offset >= buf_size) return 0;
+    size_t avail = buf_size - offset;
+    /* avail == 1: only room for '\0'. Write it directly and return 0 to advance offset.
+     * Otherwise vsnprintf would write '\0' at same position forever. */
+    if (avail == 1) {
+        buf[offset] = '\0';
+        return 0;
+    }
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(buf + offset, avail, fmt, args);
+    va_end(args);
+    if (n < 0) return 0;
+    /* vsnprintf returns chars that WOULD be written (excl. null) if unlimited.
+     * avail=1: handled above (returns 0)
+     * avail>=2: vsnprintf wrote min(n, avail-1) chars + '\0', return min(n, avail-1)
+     * Note: when n >= avail, output was truncated; we wrote avail-1 chars. */
+    if ((size_t)n >= avail) return avail - 1;
+    return (size_t)n;
+}
+
+/* Forward declaration for recursive calls */
+static size_t expr_to_sql_recursive(Expression* expr, char* buf, size_t buf_size, size_t offset);
+
+/* Serialize binary expression */
+static size_t expr_binary_to_sql(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    const char* op_str = " ";
+    if (expr->as_binary.op == TOKEN_PLUS)      op_str = " + ";
+    else if (expr->as_binary.op == TOKEN_MINUS) op_str = " - ";
+    else if (expr->as_binary.op == TOKEN_STAR)  op_str = " * ";
+    else if (expr->as_binary.op == TOKEN_SLASH) op_str = " / ";
+    else if (expr->as_binary.op == TOKEN_PERCENT) op_str = " % ";
+    else if (expr->as_binary.op == '=')          op_str = " = ";
+    else if (expr->as_binary.op == TOKEN_EQ)     op_str = " = ";
+    else if (expr->as_binary.op == TOKEN_NEQ)    op_str = " <> ";
+    else if (expr->as_binary.op == '<')         op_str = " < ";
+    else if (expr->as_binary.op == '>')         op_str = " > ";
+    else if (expr->as_binary.op == TOKEN_LTE)   op_str = " <= ";
+    else if (expr->as_binary.op == TOKEN_GTE)   op_str = " >= ";
+    else if (expr->as_binary.op == TOKEN_LIKE_OP) op_str = " LIKE ";
+    else if (expr->as_binary.op == TOKEN_AND)  op_str = " AND ";
+    else if (expr->as_binary.op == TOKEN_OR)    op_str = " OR ";
+    offset += expr_snprintf(buf, buf_size, offset, "(");
+    offset = expr_to_sql_recursive(expr->as_binary.left, buf, buf_size, offset);
+    offset += expr_snprintf(buf, buf_size, offset, "%s", op_str);
+    offset = expr_to_sql_recursive(expr->as_binary.right, buf, buf_size, offset);
+    offset += expr_snprintf(buf, buf_size, offset, ")");
+    return offset;
+}
+
+/* Serialize unary expression */
+static size_t expr_unary_to_sql(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    const char* op_str;
+    switch (expr->as_unary.op) {
+        case TOKEN_MINUS: op_str = "-"; break;
+        case TOKEN_PLUS:  op_str = "+"; break;
+        case '!':         op_str = "NOT "; break;
+        case TOKEN_NOT:   op_str = "NOT "; break;
+        default:          op_str = "";  break;
+    }
+    offset += expr_snprintf(buf, buf_size, offset, "(%s", op_str);
+    offset = expr_to_sql_recursive(expr->as_unary.operand, buf, buf_size, offset);
+    offset += expr_snprintf(buf, buf_size, offset, ")");
+    return offset;
+}
+
+/* Serialize function expression */
+static size_t expr_func_to_sql(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    offset += expr_snprintf(buf, buf_size, offset, "%s(", expr->as_func.name);
+    for (int i = 0; i < expr->as_func.arg_count; i++) {
+        if (i > 0) offset += expr_snprintf(buf, buf_size, offset, ", ");
+        offset = expr_to_sql_recursive(expr->as_func.args[i], buf, buf_size, offset);
+    }
+    offset += expr_snprintf(buf, buf_size, offset, ")");
+    return offset;
+}
+
+/* Serialize CASE expression */
+static size_t expr_case_to_sql(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    offset += expr_snprintf(buf, buf_size, offset, "(CASE ");
+    if (expr->as_case.cond) {
+        offset = expr_to_sql_recursive(expr->as_case.cond, buf, buf_size, offset);
+    }
+    offset += expr_snprintf(buf, buf_size, offset, " WHEN ");
+    if (expr->as_case.then) {
+        offset = expr_to_sql_recursive(expr->as_case.then, buf, buf_size, offset);
+    }
+    offset += expr_snprintf(buf, buf_size, offset, " ELSE ");
+    if (expr->as_case.else_) {
+        offset = expr_to_sql_recursive(expr->as_case.else_, buf, buf_size, offset);
+    }
+    offset += expr_snprintf(buf, buf_size, offset, " END)");
+    return offset;
+}
+
+/* Serialize IN expression */
+static size_t expr_in_to_sql(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    offset = expr_to_sql_recursive(expr->as_in.value, buf, buf_size, offset);
+    if (expr->as_in.not) {
+        offset += expr_snprintf(buf, buf_size, offset, " NOT IN (");
+    } else {
+        offset += expr_snprintf(buf, buf_size, offset, " IN (");
+    }
+    for (int i = 0; i < expr->as_in.count; i++) {
+        if (i > 0) offset += expr_snprintf(buf, buf_size, offset, ", ");
+        offset = expr_to_sql_recursive(expr->as_in.list[i], buf, buf_size, offset);
+    }
+    offset += expr_snprintf(buf, buf_size, offset, "))");
+    return offset;
+}
+
+/* Serialize BETWEEN expression */
+static size_t expr_between_to_sql(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    offset = expr_to_sql_recursive(expr->as_between.value, buf, buf_size, offset);
+    if (expr->as_between.not) {
+        offset += expr_snprintf(buf, buf_size, offset, " NOT BETWEEN ");
+    } else {
+        offset += expr_snprintf(buf, buf_size, offset, " BETWEEN ");
+    }
+    offset = expr_to_sql_recursive(expr->as_between.low, buf, buf_size, offset);
+    offset += expr_snprintf(buf, buf_size, offset, " AND ");
+    offset = expr_to_sql_recursive(expr->as_between.high, buf, buf_size, offset);
+    return offset;
+}
+
+/* Serialize LIKE expression */
+static size_t expr_like_to_sql(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    offset = expr_to_sql_recursive(expr->as_like.str, buf, buf_size, offset);
+    if (expr->as_like.not) {
+        offset += expr_snprintf(buf, buf_size, offset, " NOT LIKE ");
+    } else {
+        offset += expr_snprintf(buf, buf_size, offset, " LIKE ");
+    }
+    offset = expr_to_sql_recursive(expr->as_like.pattern, buf, buf_size, offset);
+    return offset;
+}
+
+static size_t expr_to_sql_recursive(Expression* expr, char* buf, size_t buf_size, size_t offset) {
+    if (!buf || buf_size == 0) return offset;
+    if (!expr) return offset;
+
+    switch (expr->type) {
+        case EXPR_LITERAL_INT:
+            offset += expr_snprintf(buf, buf_size, offset, "%" PRId64, expr->as_int);
+            break;
+
+        case EXPR_LITERAL_FLOAT: {
+            char float_buf[64];
+            snprintf(float_buf, sizeof(float_buf), "%g", expr->as_float);
+            offset += expr_snprintf(buf, buf_size, offset, "%s", float_buf);
+            break;
+        }
+
+        case EXPR_LITERAL_STRING:
+            offset += expr_snprintf(buf, buf_size, offset, "'%.*s'",
+                                    (int)expr->as_string.len, expr->as_string.str);
+            break;
+
+        case EXPR_LITERAL_NULL:
+            offset += expr_snprintf(buf, buf_size, offset, "NULL");
+            break;
+
+        case EXPR_COLUMN:
+            if (expr->as_column.table_name) {
+                offset += expr_snprintf(buf, buf_size, offset, "%s.%s",
+                                        expr->as_column.table_name, expr->as_column.col_name);
+            } else {
+                offset += expr_snprintf(buf, buf_size, offset, "%s", expr->as_column.col_name);
+            }
+            break;
+
+        case EXPR_BINARY:
+            offset = expr_binary_to_sql(expr, buf, buf_size, offset);
+            break;
+
+        case EXPR_UNARY:
+            offset = expr_unary_to_sql(expr, buf, buf_size, offset);
+            break;
+
+        case EXPR_FUNC:
+            offset = expr_func_to_sql(expr, buf, buf_size, offset);
+            break;
+
+        case EXPR_CASE:
+            offset = expr_case_to_sql(expr, buf, buf_size, offset);
+            break;
+
+        case EXPR_IN:
+            offset = expr_in_to_sql(expr, buf, buf_size, offset);
+            break;
+
+        case EXPR_BETWEEN:
+            offset = expr_between_to_sql(expr, buf, buf_size, offset);
+            break;
+
+        case EXPR_LIKE:
+            offset = expr_like_to_sql(expr, buf, buf_size, offset);
+            break;
+
+        case EXPR_SUBQUERY:
+            offset += expr_snprintf(buf, buf_size, offset, "(subquery)");
+            break;
+
+        default:
+            offset += expr_snprintf(buf, buf_size, offset, "(expr)");
+            break;
+    }
+
+    return offset;
+}
+
+size_t expr_to_sql_string(Expression* expr, char* buf, size_t buf_size) {
+    if (!buf || buf_size == 0) return 0;
+    buf[0] = '\0';
+    if (!expr) return 0;
+
+    size_t written = expr_to_sql_recursive(expr, buf, buf_size, 0);
+    /* Ensure null termination */
+    if (written < buf_size) {
+        buf[written] = '\0';
+    } else if (buf_size > 0) {
+        buf[buf_size - 1] = '\0';
+    }
+    return written;
 }

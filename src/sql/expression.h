@@ -89,4 +89,14 @@ Value* eval_in(Expression* expr, Value* row_data, int column_count, const char**
 /* Evaluate a BETWEEN expression */
 Value* eval_between(Expression* expr, Value* row_data, int column_count, const char** column_names);
 
+/*============================================================================
+ * Expression serialization
+ *============================================================================*/
+
+/* Serialize an expression to a SQL string for DEFAULT value display.
+ * Returns number of bytes written (excluding null terminator).
+ * If buffer is too small, output is truncated but still null-terminated.
+ */
+size_t expr_to_sql_string(Expression* expr, char* buf, size_t buf_size);
+
 #endif /* TINYDB_EXPRESSION_H */
