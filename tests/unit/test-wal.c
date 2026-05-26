@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "../../src/storage/wal.h"
+#include "../../src/storage/pager.h"
 #include "mini_test.h"
 #include <stdlib.h>
 #include <string.h>
@@ -141,6 +142,104 @@ test(wal_reopen) {
     teardown();
 }
 
+/* Test WAL replay */
+test(wal_replay_basic) {
+    setup();
+
+    /* Create a minimal database file so replay has a target */
+    Pager* pager = pager_create(test_db_path);
+    assert_non_null(pager);
+    pager_close(pager);
+
+    /* Write some WAL frames */
+    WAL* wal = wal_open(test_db_path);
+    assert_non_null(wal);
+
+    wal_begin_tx(wal);
+    char page_data[PAGE_SIZE];
+    memset(page_data, 'R', PAGE_SIZE);
+    wal_write_page(wal, 1, 1, page_data);
+    wal_commit_tx(wal);
+    wal_close(wal);
+
+    /* Reopen WAL and replay */
+    wal = wal_open(test_db_path);
+    assert_non_null(wal);
+
+    int ret = wal_replay(wal, test_db_path);
+    assert_eq_int(ret, SUCCESS);
+
+    wal_close(wal);
+    teardown();
+}
+
+/* Test WAL full checkpoint */
+test(wal_checkpoint_full_basic) {
+    setup();
+
+    WAL* wal = wal_open(test_db_path);
+    assert_non_null(wal);
+
+    /* Write some data */
+    wal_begin_tx(wal);
+    char page_data[PAGE_SIZE];
+    memset(page_data, 'X', PAGE_SIZE);
+    wal_write_page(wal, 1, 1, page_data);
+    wal_commit_tx(wal);
+
+    /* Perform full checkpoint */
+    int ret = wal_checkpoint_full(wal, test_db_path);
+    assert_eq_int(ret, SUCCESS);
+
+    /* After full checkpoint, frame_count should be 0 */
+    assert_true(wal->frame_count == 0);
+    assert_true(wal->log_offset == 32);  /* WAL_HEADER_SIZE is 32 */
+
+    wal_close(wal);
+    teardown();
+}
+
+/* Test WAL replay with multiple pages */
+test(wal_replay_multiple_pages) {
+    setup();
+
+    /* Create a minimal database file */
+    Pager* pager = pager_create(test_db_path);
+    assert_non_null(pager);
+    pager_close(pager);
+
+    /* Create WAL and write multiple page frames */
+    WAL* wal = wal_open(test_db_path);
+    assert_non_null(wal);
+
+    wal_begin_tx(wal);
+
+    /* Write page 1 */
+    char page1[PAGE_SIZE];
+    memset(page1, 'A', PAGE_SIZE);
+    *(uint32_t*)page1 = 0x41414141;
+    wal_write_page(wal, 1, 1, page1);
+
+    /* Write page 2 */
+    char page2[PAGE_SIZE];
+    memset(page2, 'B', PAGE_SIZE);
+    *(uint32_t*)page2 = 0x42424242;
+    wal_write_page(wal, 2, 1, page2);
+
+    wal_commit_tx(wal);
+    wal_close(wal);
+
+    /* Reopen and replay */
+    wal = wal_open(test_db_path);
+    assert_non_null(wal);
+
+    int ret = wal_replay(wal, test_db_path);
+    assert_eq_int(ret, SUCCESS);
+
+    wal_close(wal);
+    teardown();
+}
+
 /* Run all tests */
 int main(int argc, char** argv) {
     (void)argc;
@@ -155,6 +254,9 @@ int main(int argc, char** argv) {
     run(wal_page_write);
     run(wal_flush);
     run(wal_reopen);
+    run(wal_replay_basic);
+    run(wal_checkpoint_full_basic);
+    run(wal_replay_multiple_pages);
 
     printf("\nAll WAL tests passed!\n");
     return 0;

@@ -5,6 +5,7 @@
 #include "../../src/sql/token.h"
 #include "../../src/sql/parser.h"
 #include "../../src/sql/ast.h"
+#include "../../src/sql/schema.h"
 
 #include <string.h>
 
@@ -39,6 +40,21 @@ test(parser_transaction_commit);
 test(expr_simple_literal);
 test(expr_string_literal);
 test(expr_null_literal);
+test(sql_int_literal);
+test(sql_negative_int_literal);
+test(sql_float_literal);
+test(sql_string_literal);
+test(sql_null_literal);
+test(sql_binary_plus);
+test(sql_unary_minus);
+test(sql_null_buffer);
+test(sql_null_expr);
+test(schema_validate_row_valid);
+test(schema_validate_row_not_null_violation);
+test(schema_validate_row_type_mismatch);
+test(schema_validate_row_column_count_mismatch);
+test(schema_validate_row_corrupt_buffer);
+test(schema_validate_row_null_nullable);
 
 /*============================================================================
  * String tests
@@ -500,8 +516,193 @@ test(expr_null_literal) {
 }
 
 /*============================================================================
- * Test runner
+ * Schema validation tests
  *============================================================================*/
+
+/* Build a simple 2-column row: (INTEGER, INTEGER) */
+static int build_two_int_row(uint8_t* buf, int64_t v0, int64_t v1) {
+    int offset = 0;
+    buf[offset++] = 0; /* INTEGER */
+    *(uint32_t*)(buf + offset) = sizeof(int64_t);
+    offset += 4;
+    *(int64_t*)(buf + offset) = v0;
+    offset += sizeof(int64_t);
+
+    buf[offset++] = 0; /* INTEGER */
+    *(uint32_t*)(buf + offset) = sizeof(int64_t);
+    offset += 4;
+    *(int64_t*)(buf + offset) = v1;
+    offset += sizeof(int64_t);
+
+    return offset;
+}
+
+test(schema_validate_row_valid) {
+    Column cols[2];
+    memset(cols, 0, sizeof(cols));
+    strcpy(cols[0].name, "a");
+    cols[0].type = COL_TYPE_INTEGER;
+    strcpy(cols[1].name, "b");
+    cols[1].type = COL_TYPE_INTEGER;
+
+    Schema* schema = schema_create("t", cols, 2);
+    assert_non_null(schema);
+
+    uint8_t buf[64];
+    int len = build_two_int_row(buf, 10, 20);
+    int ret = schema_validate_row(schema, buf, (uint32_t)len);
+    assert_eq_int(ret, SUCCESS);
+
+    schema_destroy(schema);
+}
+
+test(schema_validate_row_not_null_violation) {
+    Column cols[2];
+    memset(cols, 0, sizeof(cols));
+    strcpy(cols[0].name, "id");
+    cols[0].type = COL_TYPE_INTEGER;
+    cols[0].not_null = 1;
+    strcpy(cols[1].name, "name");
+    cols[1].type = COL_TYPE_TEXT;
+
+    Schema* schema = schema_create("t", cols, 2);
+    assert_non_null(schema);
+
+    /* Row: INTEGER (not null) + NULL (col[1] is nullable) */
+    uint8_t buf[64];
+    int offset = 0;
+    buf[offset++] = 0;
+    *(uint32_t*)(buf + offset) = sizeof(int64_t);
+    offset += 4;
+    *(int64_t*)(buf + offset) = 42;
+    offset += sizeof(int64_t);
+
+    buf[offset++] = 3; /* NULL marker */
+    *(uint32_t*)(buf + offset) = 0;
+    offset += 4;
+
+    int ret = schema_validate_row(schema, buf, (uint32_t)offset);
+    assert_eq_int(ret, SUCCESS);  /* col[1] nullable, NULL allowed */
+
+    /* Now col[1] = NOT NULL and row has NULL there */
+    cols[1].not_null = 1;
+    Schema* schema2 = schema_create("t", cols, 2);
+    assert_non_null(schema2);
+    ret = schema_validate_row(schema2, buf, (uint32_t)offset);
+    assert_eq_int(ret, ERR_EXEC_NOT_NULL_VIOLATION);
+
+    schema_destroy(schema);
+    schema_destroy(schema2);
+}
+
+test(schema_validate_row_type_mismatch) {
+    Column cols[2];
+    memset(cols, 0, sizeof(cols));
+    strcpy(cols[0].name, "val");
+    cols[0].type = COL_TYPE_FLOAT;  /* schema expects FLOAT */
+    strcpy(cols[1].name, "extra");
+    cols[1].type = COL_TYPE_INTEGER;
+
+    Schema* schema = schema_create("t", cols, 2);
+    assert_non_null(schema);
+
+    /* Row: INTEGER (type=0) when FLOAT (type=1) expected */
+    uint8_t buf[64];
+    int offset = 0;
+    buf[offset++] = 0; /* INTEGER */
+    *(uint32_t*)(buf + offset) = sizeof(int64_t);
+    offset += 4;
+    *(int64_t*)(buf + offset) = 99;
+    offset += sizeof(int64_t);
+
+    buf[offset++] = 0; /* INTEGER */
+    *(uint32_t*)(buf + offset) = sizeof(int64_t);
+    offset += 4;
+    *(int64_t*)(buf + offset) = 1;
+    offset += sizeof(int64_t);
+
+    int ret = schema_validate_row(schema, buf, (uint32_t)offset);
+    assert_eq_int(ret, ERR_EXEC_TYPE_MISMATCH);
+
+    schema_destroy(schema);
+}
+
+test(schema_validate_row_column_count_mismatch) {
+    Column cols[3];
+    memset(cols, 0, sizeof(cols));
+    strcpy(cols[0].name, "a");
+    cols[0].type = COL_TYPE_INTEGER;
+    strcpy(cols[1].name, "b");
+    cols[1].type = COL_TYPE_INTEGER;
+    strcpy(cols[2].name, "c");
+    cols[2].type = COL_TYPE_INTEGER;
+
+    Schema* schema = schema_create("t", cols, 3);
+    assert_non_null(schema);
+
+    /* Row has only 2 columns, schema expects 3 */
+    uint8_t buf[64];
+    int len = build_two_int_row(buf, 1, 2);
+    int ret = schema_validate_row(schema, buf, (uint32_t)len);
+    assert_eq_int(ret, ERR_EXEC_TYPE_MISMATCH);
+
+    schema_destroy(schema);
+}
+
+test(schema_validate_row_corrupt_buffer) {
+    Column cols[2];
+    memset(cols, 0, sizeof(cols));
+    strcpy(cols[0].name, "a");
+    cols[0].type = COL_TYPE_INTEGER;
+    strcpy(cols[1].name, "b");
+    cols[1].type = COL_TYPE_INTEGER;
+
+    Schema* schema = schema_create("t", cols, 2);
+    assert_non_null(schema);
+
+    /* Truncated buffer: only 3 bytes of an INTEGER header */
+    uint8_t buf[3];
+    buf[0] = 0;
+    buf[1] = 8;
+    buf[2] = 0;
+
+    int ret = schema_validate_row(schema, buf, 3);
+    assert_eq_int(ret, ERR_STORAGE_CORRUPT);
+
+    schema_destroy(schema);
+}
+
+test(schema_validate_row_null_nullable) {
+    Column cols[2];
+    memset(cols, 0, sizeof(cols));
+    strcpy(cols[0].name, "id");
+    cols[0].type = COL_TYPE_INTEGER;
+    cols[0].not_null = 0;
+    strcpy(cols[1].name, "data");
+    cols[1].type = COL_TYPE_TEXT;
+    cols[1].not_null = 0;
+
+    Schema* schema = schema_create("t", cols, 2);
+    assert_non_null(schema);
+
+    /* Row: INTEGER(42) + NULL */
+    uint8_t buf[64];
+    int offset = 0;
+    buf[offset++] = 0;
+    *(uint32_t*)(buf + offset) = sizeof(int64_t);
+    offset += 4;
+    *(int64_t*)(buf + offset) = 42;
+    offset += sizeof(int64_t);
+
+    buf[offset++] = 3;
+    *(uint32_t*)(buf + offset) = 0;
+    offset += 4;
+
+    int ret = schema_validate_row(schema, buf, (uint32_t)offset);
+    assert_eq_int(ret, SUCCESS);
+
+    schema_destroy(schema);
+}
 int main(int argc, char** argv) {
     int run_unit = 0;
     int run_integration = 0;
@@ -546,6 +747,30 @@ int main(int argc, char** argv) {
         run(expr_simple_literal);
         run(expr_string_literal);
         run(expr_null_literal);
+        run(schema_validate_row_valid);
+        run(schema_validate_row_not_null_violation);
+        run(schema_validate_row_type_mismatch);
+        run(schema_validate_row_column_count_mismatch);
+        run(schema_validate_row_corrupt_buffer);
+        run(schema_validate_row_null_nullable);
+        run(sql_int_literal);
+        run(sql_negative_int_literal);
+        run(sql_float_literal);
+        run(sql_string_literal);
+        run(sql_null_literal);
+        run(sql_binary_plus);
+        run(sql_unary_minus);
+        run(sql_null_buffer);
+        run(sql_null_expr);
+        run(sql_int_literal);
+        run(sql_negative_int_literal);
+        run(sql_float_literal);
+        run(sql_string_literal);
+        run(sql_null_literal);
+        run(sql_binary_plus);
+        run(sql_unary_minus);
+        run(sql_null_buffer);
+        run(sql_null_expr);
 
         printf("\nAll unit tests passed!\n");
     }

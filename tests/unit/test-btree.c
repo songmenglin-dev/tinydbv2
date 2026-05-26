@@ -26,6 +26,8 @@ test(btree_find_nonexistent);
 test(btree_cursor_prev);
 test(btree_multiple_inserts);
 test(btree_page_split);
+test(btree_verify_empty);
+test(btree_verify_with_data);
 
 /*============================================================================
  * Test file path helper
@@ -514,6 +516,59 @@ test(btree_page_split) {
 }
 
 /*============================================================================
+ * BTree verify tests
+ *============================================================================*/
+
+test(btree_verify_empty) {
+    char* path = get_test_db_path("btree_verify_empty");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Verify empty tree returns SUCCESS */
+    assert_eq(btree_verify(tree), SUCCESS);
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+test(btree_verify_with_data) {
+    char* path = get_test_db_path("btree_verify_data");
+    Pager* pager = pager_create(path);
+    assert_non_null(pager);
+
+    PageCache* cache = page_cache_create(16, pager);
+    assert_non_null(cache);
+
+    BTree* tree = btree_create(pager, cache);
+    assert_non_null(tree);
+
+    /* Insert multiple key-value pairs */
+    for (uint64_t i = 1; i <= 50; i++) {
+        char val[16];
+        snprintf(val, sizeof(val), "value%lu", (unsigned long)i);
+        assert_eq(btree_insert(tree, i * 100, val, (uint32_t)strlen(val)), 0);
+    }
+
+    /* Verify tree with data returns SUCCESS */
+    assert_eq(btree_verify(tree), SUCCESS);
+
+    btree_close(tree);
+    page_cache_destroy(cache);
+    pager_close(pager);
+    remove_test_db(path);
+    free(path);
+}
+
+/*============================================================================
  * Test runner
  *============================================================================*/
 int main(int argc, char** argv) {
@@ -546,6 +601,8 @@ int main(int argc, char** argv) {
         run(btree_cursor_prev);
         run(btree_multiple_inserts);
         run(btree_page_split);
+        run(btree_verify_empty);
+        run(btree_verify_with_data);
 
         printf("\nAll btree unit tests passed!\n");
     }

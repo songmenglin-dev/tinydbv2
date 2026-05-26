@@ -1,5 +1,6 @@
 #include "../../src/sql/expression.h"
 #include "../../src/sql/ast.h"
+#include "../../src/sql/token.h"
 #include "mini_test.h"
 #include <string.h>
 
@@ -185,26 +186,120 @@ test(test_eval_unary_negate) {
 }
 
 /*============================================================================
- * Run all tests
+ * Expression Serialization Tests
  *============================================================================*/
-int main(void) {
-    printf("Expression Evaluation Tests\n");
-    printf("============================\n");
 
-    run(test_value_from_int);
-    run(test_value_from_float);
-    run(test_value_from_text);
-    run(test_value_from_null);
-    run(test_value_is_null);
-    run(test_value_is_truthy);
-    run(test_value_compare_integers);
-    run(test_value_compare_strings);
-    run(test_eval_literal_int);
-    run(test_eval_binary_plus);
-    run(test_eval_binary_gt);
-    run(test_eval_unary_not);
-    run(test_eval_unary_negate);
+test(sql_int_literal) {
+    Expression* expr = expr_create(EXPR_LITERAL_INT, sizeof(Expression));
+    expr->as_int = 42;
 
-    printf("\nAll tests passed!\n");
-    return 0;
+    char buf[64];
+    size_t written = expr_to_sql_string(expr, buf, sizeof(buf));
+    assert_true(written > 0);
+    assert_str_eq(buf, "42");
+
+    expr_unref(expr);
+}
+
+test(sql_negative_int_literal) {
+    Expression* expr = expr_create(EXPR_LITERAL_INT, sizeof(Expression));
+    expr->as_int = -123;
+
+    char buf[64];
+    size_t written = expr_to_sql_string(expr, buf, sizeof(buf));
+    assert_true(written > 0);
+    assert_str_eq(buf, "-123");
+
+    expr_unref(expr);
+}
+
+test(sql_float_literal) {
+    Expression* expr = expr_create(EXPR_LITERAL_FLOAT, sizeof(Expression));
+    expr->as_float = 3.14;
+
+    char buf[64];
+    size_t written = expr_to_sql_string(expr, buf, sizeof(buf));
+    assert_true(written > 0);
+    assert_true(strstr(buf, "3.14") != NULL || strstr(buf, "3.1") != NULL);
+
+    expr_unref(expr);
+}
+
+test(sql_string_literal) {
+    Expression* expr = expr_create(EXPR_LITERAL_STRING, sizeof(Expression));
+    expr->as_string.str = malloc(6);
+    memcpy(expr->as_string.str, "hello", 6);
+    expr->as_string.len = 5;
+
+    char buf[64];
+    size_t written = expr_to_sql_string(expr, buf, sizeof(buf));
+    assert_true(written > 0);
+    assert_str_eq(buf, "'hello'");
+
+    expr_unref(expr);
+}
+
+test(sql_null_literal) {
+    Expression* expr = expr_create(EXPR_LITERAL_NULL, sizeof(Expression));
+
+    char buf[64];
+    size_t written = expr_to_sql_string(expr, buf, sizeof(buf));
+    assert_true(written > 0);
+    assert_str_eq(buf, "NULL");
+
+    expr_unref(expr);
+}
+
+test(sql_binary_plus) {
+    Expression* left = expr_create(EXPR_LITERAL_INT, sizeof(Expression));
+    left->as_int = 1;
+    Expression* right = expr_create(EXPR_LITERAL_INT, sizeof(Expression));
+    right->as_int = 2;
+
+    Expression* expr = expr_create(EXPR_BINARY, sizeof(Expression));
+    expr->as_binary.left = left;
+    expr->as_binary.right = right;
+    expr->as_binary.op = TOKEN_PLUS;
+
+    char buf[64];
+    size_t written = expr_to_sql_string(expr, buf, sizeof(buf));
+    assert_true(written > 0);
+    /* Parens + binary op with spaces */
+    /* Use strcmp with expected output (e.g. "(1 + 2)") */
+    assert_true(strcmp(buf, "(1 + 2)") == 0);
+
+    expr_unref(expr);
+}
+
+test(sql_unary_minus) {
+    Expression* operand = expr_create(EXPR_LITERAL_INT, sizeof(Expression));
+    operand->as_int = 5;
+
+    Expression* expr = expr_create(EXPR_UNARY, sizeof(Expression));
+    expr->as_unary.operand = operand;
+    expr->as_unary.op = TOKEN_MINUS;
+
+    char buf[64];
+    size_t written = expr_to_sql_string(expr, buf, sizeof(buf));
+    assert_true(written > 0);
+    assert_true(strstr(buf, "-5") != NULL);
+
+    expr_unref(expr);
+}
+
+test(sql_null_buffer) {
+    Expression* expr = expr_create(EXPR_LITERAL_INT, sizeof(Expression));
+    expr->as_int = 42;
+
+    size_t written = expr_to_sql_string(expr, NULL, 0);
+    assert_eq(written, (size_t)0);
+
+    expr_unref(expr);
+}
+
+test(sql_null_expr) {
+    char buf[64];
+    size_t written = expr_to_sql_string(NULL, buf, sizeof(buf));
+    assert_eq(written, (size_t)0);
+    assert_eq(buf[0], '\0');
 }
