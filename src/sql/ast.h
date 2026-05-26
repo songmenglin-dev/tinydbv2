@@ -58,7 +58,7 @@ struct Expression {
         int64_t as_int;                                       /* EXPR_LITERAL_INT */
         double as_float;                                      /* EXPR_LITERAL_FLOAT */
         struct { char* str; size_t len; } as_string;         /* EXPR_LITERAL_STRING */
-        struct { int col_index; char* col_name; } as_column; /* EXPR_COLUMN */
+        struct { int col_index; char* col_name; char* table_name; } as_column; /* EXPR_COLUMN */
         struct { Expression* left; int op; Expression* right; } as_binary; /* EXPR_BINARY */
         struct { int op; Expression* operand; } as_unary;     /* EXPR_UNARY */
         struct { char* name; Expression** args; int arg_count; } as_func;  /* EXPR_FUNC */

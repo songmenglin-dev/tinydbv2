@@ -281,6 +281,9 @@ int catalog_init(Catalog* catalog) {
         return ret;
     }
 
+    /* Update next_key so next insert uses key 1, not key 0 */
+    catalog->next_key = 1;
+
     return SUCCESS;
 }
 
@@ -302,11 +305,51 @@ int catalog_insert(Catalog* catalog, const CatalogEntry* entry) {
 }
 
 int catalog_delete(Catalog* catalog, CatalogEntryType type, const char* name) {
-    (void)catalog;
-    (void)type;
-    (void)name;
-    /* TODO: Implement catalog delete */
-    return ERR_INTERNAL;
+    if (!catalog || !name) return ERR_INTERNAL;
+
+    /* Find the entry key using internal scan that doesn't check is_valid */
+    CatalogCursor* cursor = catalog_cursor_create(catalog);
+    if (!cursor) {
+        return ERR_INTERNAL;
+    }
+
+    uint64_t found_key = 0;
+    int found = 0;
+
+    while (catalog_cursor_valid(cursor)) {
+        uint64_t key;
+        char buf[CATALOG_ENTRY_MAX_SIZE];
+        uint32_t len = sizeof(buf);
+
+        int g_ret = btree_get(cursor->btree_cursor, &key, buf, &len);
+        if (g_ret == SUCCESS) {
+            CatalogEntry entry;
+            if (deserialize_entry(buf, len, &entry) == SUCCESS) {
+                int type_match = (entry.type == type);
+                int name_match = (strcmp(entry.name, name) == 0);
+
+                if (type_match && name_match) {
+                    found_key = key;
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        catalog_cursor_next(cursor);
+    }
+
+    catalog_cursor_free(cursor);
+
+    if (!found) {
+        return ERR_EXEC_TABLE_NOT_FOUND;
+    }
+
+    int ret = btree_delete(catalog->tree, found_key);
+    if (ret != SUCCESS) {
+        return ERR_INTERNAL;
+    }
+
+    return SUCCESS;
 }
 
 CatalogEntry* catalog_lookup_type_name(Catalog* catalog,
@@ -326,8 +369,9 @@ CatalogEntry* catalog_lookup_type_name(Catalog* catalog,
         if (entry) {
             int type_match = (entry->type == type);
             int name_match = (strcmp(entry->name, name) == 0);
+            int valid_match = (entry->is_valid == 1);
 
-            if (type_match && name_match) {
+            if (type_match && name_match && valid_match) {
                 result = malloc(sizeof(CatalogEntry));
                 if (result) {
                     memcpy(result, entry, sizeof(CatalogEntry));
@@ -354,6 +398,7 @@ CatalogEntry** catalog_get_tables(Catalog* catalog, int* count) {
     while (catalog_cursor_valid(cursor)) {
         CatalogEntry* entry = catalog_cursor_get(cursor);
         if (entry && entry->type == CATALOG_TYPE_TABLE &&
+            entry->is_valid == 1 &&
             strcmp(entry->name, CATALOG_TABLE_NAME) != 0) {
             CatalogEntry** new_entries = realloc(entries, (*count + 1) * sizeof(CatalogEntry*));
             if (!new_entries) {

@@ -117,6 +117,9 @@ int executor_exec_commit(Executor* exec, AstTransaction* stmt);
 /* ROLLBACK */
 int executor_exec_rollback(Executor* exec, AstTransaction* stmt);
 
+/* Evaluate a subquery expression */
+Value* executor_evaluate_subquery(Executor* exec, AstNode* query);
+
 /*============================================================================
  * ResultSet management
  *============================================================================*/

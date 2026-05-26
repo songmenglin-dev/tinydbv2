@@ -232,10 +232,11 @@ int executor_exec_create_table(Executor* exec, AstCreateTable* stmt) {
             columns[idx].not_null = col->not_null;
             columns[idx].primary_key = col->primary_key;
             columns[idx].autoincrement = col->autoincrement;
-            /* Default value - serialize to string */
+            /* Default value - serialize expression to string */
             if (col->default_value) {
-                /* TODO: serialize expression to string */
-                columns[idx].default_val[0] = '\0';
+                expr_to_sql_string(col->default_value,
+                                   columns[idx].default_val,
+                                   sizeof(columns[idx].default_val));
             } else {
                 columns[idx].default_val[0] = '\0';
             }
@@ -289,24 +290,69 @@ int executor_exec_create_table(Executor* exec, AstCreateTable* stmt) {
 }
 
 int executor_exec_drop_table(Executor* exec, AstDropTable* stmt) {
-    (void)exec;
-    (void)stmt;
-    /* TODO: Implement using storage layer */
+    if (!exec || !stmt || !stmt->table_name) return ERR_INTERNAL;
+    if (!exec->storage) return ERR_INTERNAL;
+
+    /* Get catalog */
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    if (!catalog) return ERR_INTERNAL;
+
+    /* Delete the table from catalog */
+    int ret = catalog_delete(catalog, CATALOG_TYPE_TABLE, stmt->table_name);
+    if (ret != SUCCESS) {
+        return ERR_EXEC_TABLE_NOT_FOUND;
+    }
+
     return SUCCESS;
 }
 
 int executor_exec_create_index(Executor* exec, AstCreateIndex* stmt) {
-    (void)exec;
-    (void)stmt;
-    /* TODO: Implement using storage layer */
-    return SUCCESS;
+    if (!exec || !stmt || !stmt->index_name || !stmt->table_name || !stmt->column_name) {
+        return ERR_INTERNAL;
+    }
+    if (!exec->storage) return ERR_INTERNAL;
+
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    Pager* pager = storage_get_pager(exec->storage);
+    PageCache* cache = storage_get_cache(exec->storage);
+    if (!catalog || !pager || !cache) return ERR_INTERNAL;
+
+    /* Build SQL string */
+    char sql[512];
+    snprintf(sql, sizeof(sql), "CREATE %sINDEX %s ON %s (%s)",
+            stmt->unique ? "UNIQUE " : "",
+            stmt->index_name, stmt->table_name, stmt->column_name);
+
+    /* Create B+tree for index */
+    BTree* index_tree = btree_create(pager, cache);
+    if (!index_tree) return ERR_STORAGE_IO;
+    uint32_t root_page = index_tree->root_page;
+
+    /* Create catalog entry */
+    CatalogEntry entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.type = CATALOG_TYPE_INDEX;
+    strncpy(entry.name, stmt->index_name, 63);
+    strncpy(entry.tbl_name, stmt->table_name, 63);
+    strncpy(entry.sql, sql, 511);
+    entry.root_page = root_page;
+    entry.is_valid = 1;
+    entry.columns = NULL;
+    entry.column_count = 0;
+
+    int ret = catalog_insert(catalog, &entry);
+    btree_close(index_tree);
+    return ret;
 }
 
 int executor_exec_drop_index(Executor* exec, AstDropIndex* stmt) {
-    (void)exec;
-    (void)stmt;
-    /* TODO: Implement using storage layer */
-    return SUCCESS;
+    if (!exec || !stmt || !stmt->index_name) return ERR_INTERNAL;
+    if (!exec->storage) return ERR_INTERNAL;
+
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    if (!catalog) return ERR_INTERNAL;
+
+    return catalog_delete(catalog, CATALOG_TYPE_INDEX, stmt->index_name);
 }
 
 /*============================================================================
@@ -404,16 +450,306 @@ int executor_exec_insert(Executor* exec, AstInsert* stmt) {
 }
 
 int executor_exec_update(Executor* exec, AstUpdate* stmt) {
-    (void)exec;
-    (void)stmt;
-    /* TODO: Implement using storage layer */
+    if (!exec || !stmt || !stmt->table_name) return ERR_INTERNAL;
+    if (!exec->storage) return ERR_INTERNAL;
+
+    /* Get storage components */
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    Pager* pager = storage_get_pager(exec->storage);
+    PageCache* cache = storage_get_cache(exec->storage);
+    if (!catalog || !pager || !cache) return ERR_INTERNAL;
+
+    /* Lookup table in catalog */
+    CatalogEntry* table_entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, stmt->table_name);
+    if (!table_entry) {
+        return ERR_EXEC_TABLE_NOT_FOUND;
+    }
+
+    /* Get table's B+tree */
+    BTree* table_tree = NULL;
+    if (table_entry->root_page > 0) {
+        table_tree = btree_open(pager, cache, table_entry->root_page);
+    }
+
+    if (!table_tree) {
+        free(table_entry);
+        return SUCCESS;  /* Empty table */
+    }
+
+    /* Build column names/indices mapping from table metadata */
+    int column_count = table_entry->column_count > 0 ? table_entry->column_count : 0;
+    char* column_names[16];
+    for (int i = 0; i < column_count && i < 16; i++) {
+        column_names[i] = table_entry->columns[i].name;
+    }
+
+    /* Build set clause column -> index map */
+    int set_col_idx[16];
+    memset(set_col_idx, -1, sizeof(set_col_idx));
+    SetClause* sc = stmt->set_clauses;
+    int set_count = 0;
+    while (sc && set_count < 16) {
+        for (int i = 0; i < column_count; i++) {
+            if (strcmp(sc->column_name, column_names[i]) == 0) {
+                set_col_idx[set_count] = i;
+                break;
+            }
+        }
+        set_count++;
+        sc = sc->next;
+    }
+
+    /* Scan all rows and update those matching WHERE clause */
+    int updated_count = 0;
+    BTreeCursor* cursor = btree_first(table_tree);
+
+    while (cursor && btree_cursor_valid(cursor)) {
+        uint64_t key;
+        uint32_t len;
+        char row_buf[2048];
+
+        int ret = btree_get(cursor, &key, row_buf, &len);
+        if (ret == SUCCESS && len > 0) {
+            /* Deserialize row data into Value array */
+            Value row_data[16];
+            memset(row_data, 0, sizeof(row_data));
+            int col_idx = 0;
+            int offset = 0;
+
+            while (offset < (int)len && col_idx < 16) {
+                if ((size_t)offset + 5 > len) break;
+                uint8_t col_type = (uint8_t)row_buf[offset];
+                uint32_t col_len = *(uint32_t*)(row_buf + offset + 1);
+
+                if (col_type == 3 || col_len == 0) break;
+                if ((size_t)offset + 5 + col_len > len) break;
+
+                offset += 5;
+
+                if (col_type == 0 && col_len == sizeof(int64_t)) {
+                    row_data[col_idx].type = VALUE_INTEGER;
+                    row_data[col_idx].as_int = *(int64_t*)(row_buf + offset);
+                    offset += sizeof(int64_t);
+                    col_idx++;
+                } else if (col_type == 1 && col_len == sizeof(double)) {
+                    row_data[col_idx].type = VALUE_FLOAT;
+                    row_data[col_idx].as_float = *(double*)(row_buf + offset);
+                    offset += sizeof(double);
+                    col_idx++;
+                } else if (col_type == 2) {
+                    row_data[col_idx].type = VALUE_TEXT;
+                    row_data[col_idx].as_text.str = NULL;
+                    row_data[col_idx].as_text.len = 0;
+                    offset += col_len;
+                    col_idx++;
+                } else {
+                    row_data[col_idx].type = VALUE_NULL;
+                    col_idx++;
+                }
+            }
+
+            /* Evaluate WHERE clause */
+            int should_update = 1;
+            if (stmt->where) {
+                Value* result = expr_eval(stmt->where, row_data, column_count, (const char**)column_names);
+                should_update = value_is_truthy(result);
+                value_free(result);
+            }
+
+            if (should_update) {
+                /* Apply SET clauses */
+                sc = stmt->set_clauses;
+                int sc_idx = 0;
+                while (sc && sc_idx < 16) {
+                    int target = set_col_idx[sc_idx];
+                    if (target >= 0) {
+                        Value* new_val = expr_eval(sc->value, row_data, column_count, (const char**)column_names);
+                        if (new_val) {
+                            value_free(&row_data[target]);
+                            row_data[target] = *new_val;
+                            free(new_val);
+                        }
+                    }
+                    sc_idx++;
+                    sc = sc->next;
+                }
+
+                /* Re-serialize updated row data */
+                char new_buf[2048];
+                int new_offset = 0;
+                for (int i = 0; i < col_idx && i < 16; i++) {
+                    Value* v = &row_data[i];
+                    if (v->type == VALUE_INTEGER) {
+                        new_buf[new_offset++] = 0;
+                        *(uint32_t*)(new_buf + new_offset) = sizeof(int64_t);
+                        new_offset += 4;
+                        *(int64_t*)(new_buf + new_offset) = v->as_int;
+                        new_offset += sizeof(int64_t);
+                    } else if (v->type == VALUE_FLOAT) {
+                        new_buf[new_offset++] = 1;
+                        *(uint32_t*)(new_buf + new_offset) = sizeof(double);
+                        new_offset += 4;
+                        *(double*)(new_buf + new_offset) = v->as_float;
+                        new_offset += sizeof(double);
+                    } else if (v->type == VALUE_TEXT && v->as_text.str) {
+                        size_t slen = strlen(v->as_text.str);
+                        size_t remaining = sizeof(new_buf) - new_offset - 5;
+                        if (slen > remaining) slen = remaining;
+                        new_buf[new_offset++] = 2;
+                        *(uint32_t*)(new_buf + new_offset) = (uint32_t)slen;
+                        new_offset += 4;
+                        memcpy(new_buf + new_offset, v->as_text.str, slen);
+                        new_offset += slen;
+                    } else {
+                        new_buf[new_offset++] = 3;
+                        *(uint32_t*)(new_buf + new_offset) = 0;
+                        new_offset += 4;
+                    }
+                }
+
+                /* Update the row in B+tree */
+                btree_update(table_tree, key, new_buf, new_offset);
+
+                /* Free updated text value copies */
+                for (int i = 0; i < col_idx && i < 16; i++) {
+                    if (row_data[i].type == VALUE_TEXT && row_data[i].as_text.str) {
+                        free(row_data[i].as_text.str);
+                    }
+                }
+
+                updated_count++;
+                /* After update, stay on current row - next iteration will move forward */
+                btree_cursor_next(cursor);
+            } else {
+                btree_cursor_next(cursor);
+            }
+        } else {
+            btree_cursor_next(cursor);
+        }
+    }
+
+    if (cursor) btree_cursor_free(cursor);
+    btree_close(table_tree);
+    free(table_entry);
+
+    (void)updated_count;
     return SUCCESS;
 }
 
 int executor_exec_delete(Executor* exec, AstDelete* stmt) {
-    (void)exec;
-    (void)stmt;
-    /* TODO: Implement using storage layer */
+    if (!exec || !stmt || !stmt->table_name) return ERR_INTERNAL;
+    if (!exec->storage) return ERR_INTERNAL;
+
+    /* Get storage components */
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    Pager* pager = storage_get_pager(exec->storage);
+    PageCache* cache = storage_get_cache(exec->storage);
+    if (!catalog || !pager || !cache) return ERR_INTERNAL;
+
+    /* Lookup table in catalog */
+    CatalogEntry* table_entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, stmt->table_name);
+    if (!table_entry) {
+        return ERR_EXEC_TABLE_NOT_FOUND;
+    }
+
+    /* Get table's B+tree */
+    BTree* table_tree = NULL;
+    if (table_entry->root_page > 0) {
+        table_tree = btree_open(pager, cache, table_entry->root_page);
+    }
+
+    if (!table_tree) {
+        free(table_entry);
+        return SUCCESS;  /* Empty table */
+    }
+
+    /* Build column names array for WHERE evaluation */
+    char* column_names[16];
+    int column_count = 0;
+    if (table_entry->column_count > 0 && table_entry->columns) {
+        for (int i = 0; i < table_entry->column_count && i < 16; i++) {
+            column_names[i] = table_entry->columns[i].name;
+            column_count++;
+        }
+    }
+
+    /* Scan all rows and delete those matching WHERE clause */
+    int deleted_count = 0;
+    BTreeCursor* cursor = btree_first(table_tree);
+
+    while (cursor && btree_cursor_valid(cursor)) {
+        uint64_t key;
+        uint32_t len;
+        char row_buf[2048];
+
+        int ret = btree_get(cursor, &key, row_buf, &len);
+        if (ret == SUCCESS && len > 0) {
+            /* Deserialize row data */
+            Value row_data[16];
+            memset(row_data, 0, sizeof(row_data));
+            int col_idx = 0;
+            int offset = 0;
+
+            while (offset < (int)len && col_idx < column_count) {
+                if ((size_t)offset + 5 > len) break;
+                uint8_t col_type = (uint8_t)row_buf[offset];
+                uint32_t col_len = *(uint32_t*)(row_buf + offset + 1);
+
+                if (col_type == 3 || col_len == 0) break;
+                if ((size_t)offset + 5 + col_len > len) break;
+
+                offset += 5;  /* skip type + length */
+
+                if (col_type == 0 && col_len == sizeof(int64_t)) {
+                    row_data[col_idx].type = VALUE_INTEGER;
+                    row_data[col_idx].as_int = *(int64_t*)(row_buf + offset);
+                    offset += sizeof(int64_t);
+                    col_idx++;
+                } else if (col_type == 1 && col_len == sizeof(double)) {
+                    row_data[col_idx].type = VALUE_FLOAT;
+                    row_data[col_idx].as_float = *(double*)(row_buf + offset);
+                    offset += sizeof(double);
+                    col_idx++;
+                } else if (col_type == 2) {
+                    /* For text columns, skip the data - we only need integer values for WHERE evaluation */
+                    /* The as_text.str pointer is NULL after memset, so we can't copy to it */
+                    row_data[col_idx].type = VALUE_TEXT;
+                    row_data[col_idx].as_text.str = NULL;
+                    row_data[col_idx].as_text.len = 0;
+                    offset += col_len;
+                    col_idx++;
+                } else {
+                    row_data[col_idx].type = VALUE_NULL;
+                    col_idx++;
+                }
+            }
+
+            /* Evaluate WHERE clause */
+            int should_delete = 1;  /* Default: delete if no WHERE */
+            if (stmt->where) {
+                Value* result = expr_eval(stmt->where, row_data, column_count, (const char**)column_names);
+                should_delete = value_is_truthy(result);
+                value_free(result);
+            }
+
+            if (should_delete) {
+                btree_delete(table_tree, key);
+                deleted_count++;
+                /* After deletion at current position, next cell shifts into this position.
+                 * Don't advance cursor - re-read current position on next iteration. */
+            } else {
+                btree_cursor_next(cursor);
+            }
+        } else {
+            btree_cursor_next(cursor);
+        }
+    }
+
+    if (cursor) btree_cursor_free(cursor);
+    btree_close(table_tree);
+    free(table_entry);
+
+    (void)deleted_count;
     return SUCCESS;
 }
 
@@ -505,13 +841,109 @@ void select_apply_distinct(ResultSet* rs) {
     rs->row_count = write_idx;
 }
 
-/* Apply ORDER BY - sort result set */
+/* Apply ORDER BY - sort result set using quicksort */
 void select_apply_order_by(ResultSet* rs, OrderByItem* order_by, char** column_names, ColumnType* column_types) {
-    (void)rs;
-    (void)order_by;
-    (void)column_names;
     (void)column_types;
-    /* TODO: Implement proper quicksort with ORDER BY */
+    if (!rs || rs->row_count <= 1 || !order_by) return;
+
+    /* Count ORDER BY items and resolve column indices */
+    int n = 0;
+    int col_indices[16] = { 0 };
+    int descending[16] = { 0 };
+    for (OrderByItem* item = order_by; item && n < 16; item = item->next) {
+        int idx = -1;
+        for (int i = 0; i < rs->column_count; i++) {
+            if (column_names && strcmp(column_names[i], item->column_name) == 0) {
+                idx = i;
+                break;
+            }
+        }
+        col_indices[n] = idx;
+        descending[n] = item->descending;
+        n++;
+    }
+    if (n == 0) return;
+
+    /* Allocate row index array */
+    int* indices = malloc(sizeof(int) * (size_t)rs->row_count);
+    if (!indices) return;
+    for (int i = 0; i < rs->row_count; i++) {
+        indices[i] = i;
+    }
+
+    /* Sort by swapping indices in-place using iterative quicksort */
+    int lo = 0, hi = rs->row_count - 1;
+    int stack[256], sp = 0;
+    stack[sp++] = lo;
+    stack[sp++] = hi;
+
+    while (sp > 0) {
+        hi = stack[--sp];
+        lo = stack[--sp];
+
+        if (lo >= hi) continue;
+
+        /* Partition: median-of-three pivot selection */
+        int mid = lo + (hi - lo) / 2;
+        int pivot = indices[mid];
+        indices[mid] = indices[hi];
+        indices[hi] = pivot;
+
+        int store = lo;
+        for (int i = lo; i < hi; i++) {
+            int ai = indices[i];
+            int cmp = 0;
+
+            /* Multi-column comparison using ORDER BY items */
+            for (int k = 0; k < n; k++) {
+                int col = col_indices[k];
+                if (col < 0 || col >= rs->column_count) continue;
+                cmp = value_compare(&rs->rows[ai][col], &rs->rows[pivot][col]);
+                if (cmp != 0) {
+                    if (descending[k]) cmp = -cmp;
+                    break;
+                }
+            }
+
+            if (cmp <= 0) {
+                int tmp = indices[store];
+                indices[store] = indices[i];
+                indices[i] = tmp;
+                store++;
+            }
+        }
+        indices[hi] = indices[store];
+        indices[store] = pivot;
+
+        /* Push larger subarray first to limit stack depth */
+        int left_size = store - lo;
+        int right_size = hi - store;
+        if (left_size > right_size) {
+            stack[sp++] = lo;
+            stack[sp++] = store - 1;
+            stack[sp++] = store + 1;
+            stack[sp++] = hi;
+        } else {
+            stack[sp++] = store + 1;
+            stack[sp++] = hi;
+            stack[sp++] = lo;
+            stack[sp++] = store - 1;
+        }
+    }
+
+    /* Reorder rows in-place according to sorted index array */
+    Value** rows_copy = malloc(sizeof(Value*) * (size_t)rs->row_count);
+    if (!rows_copy) {
+        free(indices);
+        return;
+    }
+    memcpy(rows_copy, rs->rows, sizeof(Value*) * (size_t)rs->row_count);
+    for (int i = 0; i < rs->row_count; i++) {
+        rs->rows[i] = rows_copy[indices[i]];
+    }
+
+    free(rows_copy);
+    free(indices);
 }
 
 /* Apply LIMIT and OFFSET */
@@ -918,8 +1350,205 @@ int executor_exec_describe_table(Executor* exec, AstDescribeTable* stmt, ResultC
 }
 
 ResultSet* executor_select(Executor* exec, AstSelect* select) {
-    (void)exec;
-    (void)select;
-    /* TODO: Implement SELECT returning ResultSet */
-    return result_set_create(16);
+    if (!exec || !select) return result_set_create(16);
+    if (!exec->storage) return result_set_create(16);
+
+    /* Empty result if no table (scalar SELECT) */
+    if (!select->table_name) {
+        ResultSet* rs = result_set_create(1);
+        return rs;
+    }
+
+    /* Get storage components */
+    Catalog* catalog = storage_get_catalog(exec->storage);
+    Pager* pager = storage_get_pager(exec->storage);
+    PageCache* cache = storage_get_cache(exec->storage);
+    if (!catalog || !pager || !cache) return result_set_create(16);
+
+    /* Lookup table in catalog */
+    CatalogEntry* table_entry = catalog_lookup_type_name(catalog, CATALOG_TYPE_TABLE, select->table_name);
+    if (!table_entry) return result_set_create(16);
+
+    /* Get table's B+tree */
+    BTree* table_tree = NULL;
+    if (table_entry->root_page > 0) {
+        table_tree = btree_open(pager, cache, table_entry->root_page);
+    }
+
+    if (!table_tree) {
+        free(table_entry);
+        return result_set_create(16);  /* Empty table */
+    }
+
+    /* Build column metadata from catalog */
+    int table_col_count = table_entry->column_count;
+    if (table_col_count > 16) table_col_count = 16;
+
+    const char* src_column_names[16];
+    ColumnType src_column_types[16];
+    (void)src_column_types;  /* reserved for future type-based filtering */
+    for (int i = 0; i < table_col_count; i++) {
+        src_column_names[i] = table_entry->columns[i].name;
+        src_column_types[i] = table_entry->columns[i].type;
+    }
+
+    /* Create result set */
+    ResultSet* rs = result_set_create(64);
+    rs->column_count = table_col_count;
+
+    /* Scan all rows from B+tree */
+    BTreeCursor* cursor = btree_first(table_tree);
+
+    while (cursor && btree_cursor_valid(cursor)) {
+        uint64_t key;
+        uint32_t len;
+        char row_buf[2048];
+
+        int ret = btree_get(cursor, &key, row_buf, &len);
+        if (ret == SUCCESS && len > 0) {
+            /* Deserialize row into Value array */
+            Value row_data[16];
+            memset(row_data, 0, sizeof(row_data));
+            int col_idx = 0;
+            int offset = 0;
+
+            while (offset < (int)len && col_idx < table_col_count) {
+                if ((size_t)offset + 5 > len) break;
+                uint8_t col_type = (uint8_t)row_buf[offset];
+                uint32_t col_len = *(uint32_t*)(row_buf + offset + 1);
+
+                if (col_type == 3 || col_len == 0) break;  /* null */
+                if ((size_t)offset + 5 + col_len > len) break;
+
+                offset += 5;  /* skip type(1) + length(4) */
+
+                if (col_type == 0 && col_len == sizeof(int64_t)) {
+                    row_data[col_idx].type = VALUE_INTEGER;
+                    row_data[col_idx].as_int = *(int64_t*)(row_buf + offset);
+                    offset += (int)sizeof(int64_t);
+                    col_idx++;
+                } else if (col_type == 1 && col_len == sizeof(double)) {
+                    row_data[col_idx].type = VALUE_FLOAT;
+                    row_data[col_idx].as_float = *(double*)(row_buf + offset);
+                    offset += (int)sizeof(double);
+                    col_idx++;
+                } else if (col_type == 2) {
+                    row_data[col_idx].type = VALUE_TEXT;
+                    row_data[col_idx].as_text.str = malloc(col_len + 1);
+                    if (row_data[col_idx].as_text.str) {
+                        memcpy(row_data[col_idx].as_text.str, row_buf + offset, col_len);
+                        row_data[col_idx].as_text.str[col_len] = '\0';
+                        row_data[col_idx].as_text.len = col_len;
+                    } else {
+                        row_data[col_idx].as_text.str = NULL;
+                        row_data[col_idx].as_text.len = 0;
+                    }
+                    offset += (int)col_len;
+                    col_idx++;
+                } else {
+                    row_data[col_idx].type = VALUE_NULL;
+                    col_idx++;
+                }
+            }
+
+            /* Apply WHERE clause */
+            if (!select_apply_where(row_data, select->where, table_col_count, src_column_names)) {
+                /* Free text copies before skipping */
+                for (int i = 0; i < col_idx; i++) {
+                    if (row_data[i].type == VALUE_TEXT && row_data[i].as_text.str) {
+                        free(row_data[i].as_text.str);
+                    }
+                }
+                btree_cursor_next(cursor);
+                continue;
+            }
+
+            /* Project columns */
+            Value* projected = select_project_columns(
+                row_data, col_idx, select->columns,
+                src_column_names, &rs->column_names,
+                &rs->column_types, &rs->column_count);
+
+            /* Add row to result set */
+            result_set_add_row(rs, projected);
+
+            /* Free source row text copies (projected columns are copies or aliases) */
+            for (int i = 0; i < col_idx; i++) {
+                if (row_data[i].type == VALUE_TEXT && row_data[i].as_text.str) {
+                    free(row_data[i].as_text.str);
+                }
+            }
+        }
+
+        btree_cursor_next(cursor);
+    }
+
+    if (cursor) btree_cursor_free(cursor);
+    btree_close(table_tree);
+    free(table_entry);
+
+    /* Apply post-scan processing */
+    if (select->is_distinct) {
+        select_apply_distinct(rs);
+    }
+    if (select->order_by && rs->column_names) {
+        select_apply_order_by(rs, select->order_by, rs->column_names, rs->column_types);
+    }
+    if (select->limit || select->offset) {
+        select_apply_limit(rs, select->limit, select->offset);
+    }
+
+    exec->rows_read += (uint64_t)rs->row_count;
+    return rs;
+}
+
+/*============================================================================
+ * Subquery evaluation
+ *============================================================================*/
+
+/* Evaluate a scalar subquery and return its first value.
+ * Used by expression.c for EXPR_SUBQUERY evaluation.
+ * Returns a Value (caller must free), or NULL on error. */
+Value* executor_evaluate_subquery(Executor* exec, AstNode* query) {
+    /* Subqueries use the caller's executor if available, otherwise create a minimal one */
+    if (!exec) {
+        /* Subqueries need the same storage context - this will need to be passed from
+         * expression evaluation context in a real implementation. For now, return NULL. */
+        return value_from_null();
+    }
+
+    if (!query || query->type != AST_SELECT) {
+        return value_from_null();
+    }
+
+    /* Execute the subquery as a SELECT */
+    ResultSet* rs = executor_select(exec, (AstSelect*)query);
+    if (!rs || rs->row_count == 0) {
+        if (rs) result_set_free(rs);
+        return value_from_null();
+    }
+
+    /* Return first value of first row */
+    Value* result = NULL;
+    if (rs->rows[0] && rs->column_count > 0) {
+        result = value_from_null();
+        Value* src = &rs->rows[0][0];
+        switch (src->type) {
+            case VALUE_INTEGER:
+                result = value_from_int(src->as_int);
+                break;
+            case VALUE_FLOAT:
+                result = value_from_float(src->as_float);
+                break;
+            case VALUE_TEXT:
+                result = value_from_text(src->as_text.str, src->as_text.len);
+                break;
+            default:
+                result = value_from_null();
+                break;
+        }
+    }
+
+    result_set_free(rs);
+    return result;
 }

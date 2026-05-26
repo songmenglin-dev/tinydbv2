@@ -268,11 +268,78 @@ Column* schema_column(const Schema* schema, const char* name) {
     return (idx >= 0) ? &schema->columns[idx] : NULL;
 }
 
+/* Map value type byte to ColumnType */
+static ColumnType value_type_to_column_type(uint8_t type_byte) {
+    switch (type_byte) {
+        case 0: return COL_TYPE_INTEGER;
+        case 1: return COL_TYPE_FLOAT;
+        case 2: return COL_TYPE_TEXT;
+        default: return COL_TYPE_BLOB;  /* 3 / other = NULL marker */
+    }
+}
+
 int schema_validate_row(const Schema* schema, const void* row_data, uint32_t size) {
-    (void)schema;
-    (void)row_data;
-    (void)size;
-    /* TODO: Implement row validation */
+    if (!schema || !row_data) return ERR_INTERNAL;
+
+    const uint8_t* buf = (const uint8_t*)row_data;
+    uint32_t offset = 0;
+    int col_idx = 0;
+
+    /* Deserialize values and validate each column */
+    while (offset < size && col_idx < schema->col_count) {
+        if ((size_t)offset + 5 > size) return ERR_STORAGE_CORRUPT;
+
+        uint8_t type_byte = buf[offset];
+        uint32_t col_len = *(uint32_t*)(buf + offset + 1);
+
+        if (type_byte == 3 || col_len == 0) {
+            /* NULL marker */
+            Column* col = &schema->columns[col_idx];
+            if (col->not_null) {
+                return ERR_EXEC_NOT_NULL_VIOLATION;
+            }
+            offset += 5;
+            col_idx++;
+            continue;
+        }
+
+        if ((size_t)offset + 5 + col_len > size) return ERR_STORAGE_CORRUPT;
+        offset += 5;
+
+        Column* col = &schema->columns[col_idx];
+        ColumnType col_type = value_type_to_column_type(type_byte);
+
+        /* Check type compatibility */
+        switch (col_type) {
+            case COL_TYPE_INTEGER:
+                if (col_len != sizeof(int64_t)) return ERR_EXEC_TYPE_MISMATCH;
+                offset += sizeof(int64_t);
+                break;
+            case COL_TYPE_FLOAT:
+                if (col_len != sizeof(double)) return ERR_EXEC_TYPE_MISMATCH;
+                offset += sizeof(double);
+                break;
+            case COL_TYPE_TEXT:
+                offset += col_len;
+                break;
+            default:
+                return ERR_EXEC_TYPE_MISMATCH;
+        }
+
+        /* Check TEXT/BLOB columns: if type_byte indicates non-NULL but column
+         * expects INTEGER or FLOAT, it is a type mismatch */
+        if (col->type != col_type && col_type != COL_TYPE_BLOB) {
+            return ERR_EXEC_TYPE_MISMATCH;
+        }
+
+        col_idx++;
+    }
+
+    /* Check column count matches schema */
+    if (col_idx != schema->col_count) {
+        return ERR_EXEC_TYPE_MISMATCH;
+    }
+
     return SUCCESS;
 }
 
