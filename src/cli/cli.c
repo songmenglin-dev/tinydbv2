@@ -507,12 +507,17 @@ int cli_format_table(char* resp, size_t resp_len, double elapsed_sec) {
     char* line = line_start;
     while (line && line < end_marker) {
         char* next_line = strchr(line, '\n');
-        /* Note: don't modify the buffer here - second pass needs the newlines */
 
         if (strncmp(line, "ROW:", 4) == 0) {
             first_pass_rows++;
             if (first_row_data == NULL) {
-                first_row_data = line + 4;
+                /* Extract just the first row's data, null-terminated */
+                size_t first_row_len = next_line ? (size_t)(next_line - line - 4) : strlen(line + 4);
+                first_row_data = malloc(first_row_len + 1);
+                if (first_row_data) {
+                    memcpy(first_row_data, line + 4, first_row_len);
+                    first_row_data[first_row_len] = '\0';
+                }
             }
         }
         line = next_line ? next_line + 1 : NULL;
@@ -575,9 +580,18 @@ int cli_format_table(char* resp, size_t resp_len, double elapsed_sec) {
         line = next_line ? next_line + 1 : NULL;
     }
 
-    /* Detect query type by column count */
+    /* Detect query type. DESC and SHOW TABLES return data-only rows (no header row).
+     * Regular SELECT returns column names as first ROW: line, so we subtract it below.
+     * Use column count as tiebreaker since a small DESC could have 6 cols matching a 6-col SELECT. */
     int is_desc_query = (col_count == 6);
     int is_show_tables = (col_count == 1);
+
+    /* For SELECT queries, first ROW: line is the header - exclude it from row count.
+     * For DESC, all ROW: lines are data rows (no separate header).
+     * For SHOW TABLES, same as DESC. */
+    /* Note: actual_rows is NOT decremented here because the parsing loop
+     * uses actual_rows as its limit. The start_row variable handles
+     * skipping the header row during display instead. */
 
     /* Find header row - use first ROW: line, but DESC/SHOW have hardcoded headers */
     char header[16][256];
@@ -588,6 +602,17 @@ int cli_format_table(char* resp, size_t resp_len, double elapsed_sec) {
             strncpy(header[i], desc_headers[i], sizeof(header[i]) - 1);
             header[i][sizeof(header[i]) - 1] = '\0';
             widths[i] = strlen(desc_headers[i]);
+        }
+        /* Update widths from actual data rows */
+        for (int r = 0; r < actual_rows; r++) {
+            for (int c = 0; c < col_count; c++) {
+                if (rows[r][c] != NULL) {
+                    size_t len = strlen(rows[r][c]);
+                    if ((int)len > widths[c]) {
+                        widths[c] = (int)len;
+                    }
+                }
+            }
         }
     } else if (is_show_tables) {
         /* SHOW TABLES: use generic header */
@@ -636,10 +661,12 @@ int cli_format_table(char* resp, size_t resp_len, double elapsed_sec) {
     /* Bottom border */
     print_border(widths, col_count);
 
-    /* Footer */
-    cli_format_footer(actual_rows, elapsed_sec);
+    /* Footer - for regular SELECT, actual_rows includes header, so subtract 1 */
+    int footer_rows = (is_desc_query || is_show_tables) ? actual_rows : actual_rows - 1;
+    cli_format_footer(footer_rows, elapsed_sec);
 
     /* Free memory */
+    free(first_row_data);
     for (int i = 0; i < actual_rows; i++) {
         for (int j = 0; j < col_count; j++) {
             if (rows[i][j]) free(rows[i][j]);
