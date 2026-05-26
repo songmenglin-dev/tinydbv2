@@ -2,29 +2,25 @@
 
 ## 概述
 
-本文档记录 TinyDB v2 项目的所有功能测试用例，包括测试步骤和测试结果。
+本文档记录 TinyDB v2 项目的所有功能测试用例，基于实际测试代码编写。
 
 ## 目录结构
 
-| 文档 | 内容 |
-|------|------|
-| [test-sql-lexer.md](./test-sql-lexer.md) | SQL Lexer 测试用例 |
-| [test-sql-parser.md](./test-sql-parser.md) | SQL Parser 测试用例 |
-| [test-expression.md](./test-expression.md) | Expression Evaluation 测试用例 |
-| [test-btree.md](./test-btree.md) | B+Tree Storage 测试用例 |
-| [test-wal.md](./test-wal.md) | WAL 测试用例 |
-| [test-schema.md](./test-schema.md) | Schema 测试用例 |
-| [test-executor.md](./test-executor.md) | Executor 测试用例 |
-| [test-catalog.md](./test-catalog.md) | Catalog 测试用例 |
-| [test-cli.md](./test-cli.md) | CLI 测试用例 |
-| [test-integration.md](./test-integration.md) | Integration 测试用例 |
+| 文档 | 实际测试数 | 说明 |
+|------|-----------|------|
+| [test-sql-lexer.md](./test-sql-lexer.md) | 12 | 基于 `tests/unit/test_lexer.c` |
+| [test-sql-parser.md](./test-sql-parser.md) | 14 | 基于 `tests/unit/test_parser.c` |
+| [test-expression.md](./test-expression.md) | 22 | 基于 `tests/unit/test-expression.c` |
+| [test-btree.md](./test-btree.md) | 17 | 基于 `tests/unit/test-btree.c` |
+| [test-wal.md](./test-wal.md) | 10 | 基于 `tests/unit/test-wal.c` |
+| [test-schema.md](./test-schema.md) | 12 | 基于 `tests/unit/test-schema.c` |
 
 ## 测试环境
 
 - **平台**: Linux (WSL2)
 - **编译器**: GCC
 - **构建工具**: Make
-- **测试框架**: mini_test.h
+- **测试框架**: mini_test.h (tests/unit/mini_test.h)
 
 ## 运行测试
 
@@ -32,33 +28,35 @@
 # 运行所有单元测试
 make test
 
-# 运行特定模块测试
-./tests/unit/test-suite
-
-# 运行特定测试文件
-./tests/unit/test-btree
+# 运行特定模块测试 (test-suite 汇总了部分测试)
+./build/test-suite --unit
 ```
 
 ## 测试结果汇总
 
-| 模块 | 测试用例数 | 通过数 | 通过率 |
-|------|-----------|--------|--------|
-| SQL Lexer | 11 | 11 | 100% |
-| SQL Parser | 17 | 17 | 100% |
-| Expression | 15 | 15 | 100% |
-| B+Tree | 17 | 17 | 100% |
-| WAL | 10 | 10 | 100% |
-| Schema | 16 | 16 | 100% |
-| Executor | 18 | 18 | 100% |
-| Catalog | 11 | 11 | 100% |
-| CLI | 10 | 10 | 100% |
-| Integration | 15 | 15 | 100% |
-| **总计** | **140** | **140** | **100%** |
+| 模块 | 测试函数数 | 状态 |
+|------|-----------|------|
+| SQL Lexer | 12 | ✅ PASS |
+| SQL Parser | 14 | ✅ PASS |
+| Expression | 22 | ✅ PASS |
+| B+Tree Storage | 17 | ✅ PASS |
+| WAL | 10 | ✅ PASS |
+| Schema | 12 | ✅ PASS |
+| **总计** | **87** | **100%** |
+
+---
 
 ## 测试运行记录
 
 ```
 $ make test
+  string_len_basic... OK
+  string_dup_basic... OK
+  string_eq_basic... OK
+  error_code_to_string... OK
+  error_create_basic... OK
+  list_create_basic... OK
+  list_append_get... OK
   lexer_basic_tokens... OK
   lexer_integer_tokens... OK
   lexer_real_tokens... OK
@@ -95,18 +93,19 @@ $ make test
   sql_unary_minus... OK
   sql_null_buffer... OK
   sql_null_expr... OK
-  sql_int_literal... OK
-  sql_negative_int_literal... OK
-  sql_float_literal... OK
-  sql_string_literal... OK
-  sql_null_literal... OK
-  sql_binary_plus... OK
-  sql_unary_minus... OK
-  sql_null_buffer... OK
-  sql_null_expr... OK
+  (多个测试重复运行)
 
 All unit tests passed!
 
 ====================
 Test suite completed.
 ```
+
+---
+
+## 注意事项
+
+1. **文档与代码对应**: 每个测试用例都标注了对应的 `test()` 函数名
+2. **PASS 状态**: 基于 `make test` 运行结果
+3. **覆盖率**: 当前文档覆盖的模块均有实际测试代码支持
+4. **未覆盖模块**: CLI、Executor、Catalog 等模块已有占位测试文件但需完善
