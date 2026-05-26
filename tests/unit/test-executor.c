@@ -69,15 +69,4 @@ test(test_select_apply_where_no_filter) {
     printf("  test_select_apply_where_no_filter passed\n");
 }
 
-int main(void) {
-    printf("Executor Tests (simplified)\n");
-    printf("===============\n");
-
-    run(test_result_set_create);
-    run(test_result_set_add_row);
-    run(test_executor_create);
-    run(test_select_apply_where_no_filter);
-
-    printf("\nAll tests passed!\n");
-    return 0;
-}
+// Tests are run via test-suite.c main()

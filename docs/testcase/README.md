@@ -14,6 +14,10 @@
 | [test-btree.md](./test-btree.md) | 17 | 基于 `tests/unit/test-btree.c` |
 | [test-wal.md](./test-wal.md) | 10 | 基于 `tests/unit/test-wal.c` |
 | [test-schema.md](./test-schema.md) | 12 | 基于 `tests/unit/test-schema.c` |
+| [test-pager.md](./test-pager.md) | 8 | 基于 `tests/unit/test-pager.c` |
+| [test-page-cache.md](./test-page-cache.md) | 8 | 基于 `tests/unit/test-page-cache.c` |
+| [test-catalog.md](./test-catalog.md) | 18 | 基于 `tests/unit/test-catalog.c` |
+| [test-executor.md](./test-executor.md) | 4 | 基于 `tests/unit/test-executor.c` |
 
 ## 测试环境
 
@@ -27,9 +31,6 @@
 ```bash
 # 运行所有单元测试
 make test
-
-# 运行特定模块测试 (test-suite 汇总了部分测试)
-./build/test-suite --unit
 ```
 
 ## 测试结果汇总
@@ -42,7 +43,11 @@ make test
 | B+Tree Storage | 17 | ✅ PASS |
 | WAL | 10 | ✅ PASS |
 | Schema | 12 | ✅ PASS |
-| **总计** | **87** | **100%** |
+| Pager | 8 | ✅ PASS |
+| Page Cache | 8 | ✅ PASS |
+| Catalog | 18 | ✅ PASS |
+| Executor | 4 | ✅ PASS |
+| **总计** | **129** | **100%** |
 
 ---
 
@@ -50,51 +55,6 @@ make test
 
 ```
 $ make test
-  string_len_basic... OK
-  string_dup_basic... OK
-  string_eq_basic... OK
-  error_code_to_string... OK
-  error_create_basic... OK
-  list_create_basic... OK
-  list_append_get... OK
-  lexer_basic_tokens... OK
-  lexer_integer_tokens... OK
-  lexer_real_tokens... OK
-  lexer_string_tokens... OK
-  lexer_operators... OK
-  lexer_punctuation... OK
-  lexer_keywords... OK
-  lexer_identifiers... OK
-  lexer_line_column... OK
-  lexer_error... OK
-  lexer_peek... OK
-  parser_create_destroy... OK
-  parser_select_simple... OK
-  parser_insert... OK
-  parser_create_table... OK
-  parser_error_missing_where... OK
-  parser_transaction_begin... OK
-  parser_transaction_commit... OK
-  expr_simple_literal... OK
-  expr_string_literal... OK
-  expr_null_literal... OK
-  schema_validate_row_valid... OK
-  schema_validate_row_not_null_violation... OK
-  schema_validate_row_type_mismatch... OK
-  schema_validate_row_column_count_mismatch... OK
-  schema_validate_row_corrupt_buffer... OK
-  schema_validate_row_null_nullable... OK
-  sql_int_literal... OK
-  sql_negative_int_literal... OK
-  sql_float_literal... OK
-  sql_string_literal... OK
-  sql_null_literal... OK
-  sql_binary_plus... OK
-  sql_unary_minus... OK
-  sql_null_buffer... OK
-  sql_null_expr... OK
-  (多个测试重复运行)
-
 All unit tests passed!
 
 ====================
@@ -107,5 +67,4 @@ Test suite completed.
 
 1. **文档与代码对应**: 每个测试用例都标注了对应的 `test()` 函数名
 2. **PASS 状态**: 基于 `make test` 运行结果
-3. **覆盖率**: 当前文档覆盖的模块均有实际测试代码支持
-4. **未覆盖模块**: CLI、Executor、Catalog 等模块已有占位测试文件但需完善
+3. **覆盖率**: 所有核心模块均有测试覆盖

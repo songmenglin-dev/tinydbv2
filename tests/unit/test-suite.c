@@ -10,6 +10,7 @@
 #include "../../src/sql/token.h"
 #include "../../src/sql/parser.h"
 #include "../../src/sql/ast.h"
+#include "../../src/sql/executor.h"
 #include "../../src/sql/schema.h"
 #include "../../src/storage/pager.h"
 #include "../../src/storage/page_cache.h"
@@ -62,6 +63,13 @@ test(schema_validate_row_type_mismatch);
 test(schema_validate_row_column_count_mismatch);
 test(schema_validate_row_corrupt_buffer);
 test(schema_validate_row_null_nullable);
+
+/* Executor tests */
+test(test_result_set_create);
+test(test_result_set_add_row);
+test(test_executor_create);
+test(test_select_apply_where_no_filter);
+
 test(pager_create_and_close);
 test(pager_create_and_open);
 test(pager_allocate_pages);
@@ -830,6 +838,10 @@ int main(int argc, char** argv) {
         run(catalog_cursor_iterate);
         run(catalog_cursor_next_and_valid);
         run(catalog_free_entries);
+        run(test_result_set_create);
+        run(test_result_set_add_row);
+        run(test_executor_create);
+        run(test_select_apply_where_no_filter);
         run(sql_int_literal);
         run(sql_negative_int_literal);
         run(sql_float_literal);
