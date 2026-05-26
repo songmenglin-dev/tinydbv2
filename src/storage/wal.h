@@ -27,8 +27,8 @@ typedef enum {
 /* WAL frame header size */
 #define WAL_FRAME_HEADER_SIZE 32
 
-/* WAL entry header size */
-#define WAL_ENTRY_HEADER_SIZE 12
+/* WAL entry header size (sizeof packed WALEntryHeader) */
+#define WAL_ENTRY_HEADER_SIZE 16
 
 /* Maximum WAL frame size (page data + header) */
 #define WAL_MAX_FRAME_SIZE (PAGE_SIZE + WAL_FRAME_HEADER_SIZE)
